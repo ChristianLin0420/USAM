@@ -1,0 +1,11 @@
+# USAM Phase C (T3 — sim + real-robot eval) deps.
+# Layered on top of requirements/base.txt for the eval workflow.
+#
+# Note: LIBERO is installed from source — not on PyPI. Run, after
+# `pip install -r requirements/base.txt -r requirements/eval.txt`:
+#   pip install "git+https://github.com/Lifelong-Robot-Learning/LIBERO.git"
+# See docs/HOWTO_*.md for full setup.
+
+# --- sim envs ---
+robosuite
+robocasa

@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: MIT
+# USAM — Phase A prep image (T1, 8xA100 Slurm).
+#
+# Used for the data pipeline only:
+#   download -> stage_2a_to_lerobot -> flow / depth -> dino_cache -> upload.
+# NO flash-attn here; prep is not training.
+#
+# Build:
+#   docker build -f docker/Dockerfile.prep_a100 -t usam:prep-a100 .
+# Convert to Singularity for Slurm:
+#   singularity build usam_prep.sif docker-daemon://usam:prep-a100
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# --- system deps ---
+# `rsync` and `zstd` are used by prep/_hub.py for staging shards.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3.10-dev python3-pip \
+        git git-lfs ffmpeg \
+        libgl1-mesa-glx libglib2.0-0 \
+        wget curl ca-certificates build-essential \
+        rsync zstd \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && git lfs install \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/USAM
+
+# --- python deps ---
+COPY pyproject.toml ./
+COPY requirements/base.txt requirements/base.txt
+COPY requirements/prep.txt requirements/prep.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -r requirements/base.txt \
+    && pip install -r requirements/prep.txt
+
+# --- project source ---
+COPY . .
+RUN pip install -e .
+
+# HF Hub fast-transfer paths used by prep/_hub.py + stage_6_upload.py.
+ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
+    PYTHONPATH=/workspace/USAM
+
+CMD ["bash"]

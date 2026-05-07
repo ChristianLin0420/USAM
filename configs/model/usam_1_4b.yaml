@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: MIT
+# USAM main model — full 1.4B Player + DINOv3 ViT-L/14.
+# This config is consumed by `usam.train` (training-engineer's wave) and
+# is the source of truth for shape contracts. It mirrors the structure of
+# `lda/config/*` but lives outside `lda/` so we don't fork upstream.
+
+name: usam_1_4b
+
+# ---------------------------------------------------------------------------
+# Tri-DINO encoder (frozen backbone + trainable adapters + LoRA r=8)
+# ---------------------------------------------------------------------------
+encoder:
+  type: tri_dino
+  # Path to a local DINOv3 checkpoint directory (HF format). The training
+  # entry point converts this to an absolute path before instantiation.
+  dinov3_ckpt: /datasets/dinov3/dinov3-vitl14-pretrain-lvd1689m
+  dinov3_arch: vit_l_14
+  # 27 * 14 = 378. The plan refers to this as "384²" colloquially but
+  # the patch grid math requires an exact multiple of the patch size.
+  image_size: 378
+  patch_size: 14
+  embed_dim: 1024
+  num_register_tokens: 4
+  lora_rank: 8
+  lora_target_names: ["query", "key", "value"]
+  freeze_rgb_patch_embed: false
+  # Number of patch tokens kept by `extract_features` for the cache.
+  cache_n_keep_tokens: 64
+
+# ---------------------------------------------------------------------------
+# Player MM-DiT — full 1.4B (DiT-L)
+# ---------------------------------------------------------------------------
+player:
+  action_model_type: DiT-L      # 1536 / 32 heads / 48 head_dim → 1.4B w/ depth=24
+  num_layers: 24
+  hidden_size: 1024
+  input_embedding_dim: 1536
+  cross_attention_dim: 4096      # Qwen3-VL-4B last hidden size
+  output_dim: 1024               # matches DINOv3-L embed_dim
+  positional_embeddings: rope
+  attention_bias: true
+  dropout: 0.0
+  activation_fn: gelu-approximate
+  norm_elementwise_affine: false
+  num_residual_streams: 1
+  final_norm: true
+  num_target_vision_tokens: 32
+  flash_attn: true
+  qk_rmsnorm: true
+  # USAM-only flags forwarded into the MM-DiT __init__ (kwargs):
+  enable_proprio_cond: true
+  proprio_dim: 50
+  enable_depth_head: true
+  enable_flow_head: true
+
+# ---------------------------------------------------------------------------
+# Action / state head
+# ---------------------------------------------------------------------------
+action_head:
+  action_dim: 32
+  state_dim: 50
+  action_horizon: 16
+  noise_beta_alpha: 1.5
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+  num_timestep_buckets: 1000
+  num_inference_timesteps: 10
+  max_num_embodiments: 16
+  obs_horizon: 4
+  num_views: 2
+  add_pos_embed: true
+
+# ---------------------------------------------------------------------------
+# Conductor (frozen Qwen3-VL-4B; conductor-engineer instantiates)
+# ---------------------------------------------------------------------------
+conductor:
+  qwen_ckpt: /datasets/qwen3-vl-4b
+  n_plan_tokens: 32
+  player_d_model: 1536
+  e_dim: 4096
+
+# ---------------------------------------------------------------------------
+# Aux heads (filled in by losses-engineer; kept here for completeness)
+# ---------------------------------------------------------------------------
+aux_heads:
+  geom:
+    enabled: true
+    dav2_distill_ckpt: /checkpoints/dav2_distill.pt
+    nearfield_proto_ckpt: /checkpoints/nearfield_proto.pt
+  flow_action:
+    enabled: true
+    proprio_dim: 50
+    action_chunk_dim: 112  # 7 * 16
+    hidden: 256
+  drift:
+    enabled: true
+    rgb_dino_dim: 1024
+    e_dim: 4096
+    hidden: 256
+  subtask:
+    enabled: true
+    p_hat_dim: 1536
+    rgb_dino_dim: 1024
+    hidden: 512

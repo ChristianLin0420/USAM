@@ -1,0 +1,21 @@
+# USAM Phase B (T0 dev / T2 H200 burst) deps.
+# Installed on top of requirements/base.txt by docker/Dockerfile.local_a40 and
+# docker/Dockerfile.train_h200.
+#
+# IMPORTANT — flash-attn is NOT installed via this file. Each train Dockerfile
+# runs `pip install --no-build-isolation flash-attn==2.6.3` after this file is
+# resolved (flash-attn's build step requires torch to be importable, which pip
+# resolution alone cannot guarantee).
+
+# --- experiment tracking + metrics ---
+wandb==0.23.0
+torchmetrics
+
+# --- transformer-engine: FP8 for H200 only ---
+# transformer-engine is intentionally OPTIONAL at this layer. Behavior:
+#   * Dockerfile.train_h200 starts from nvcr.io/nvidia/pytorch:25.01-py3, which
+#     ships transformer-engine pre-installed and matched to the container's
+#     CUDA/cuDNN/NCCL versions. No pip install of TE in that image.
+#   * Dockerfile.local_a40 (A40 dev box) skips TE entirely — A40 lacks FP8 HW.
+# If you need TE for some other reason, install it explicitly outside this file.
+# transformer-engine  # H200-only; provided by the NGC base image.

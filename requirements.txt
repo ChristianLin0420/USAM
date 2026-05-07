@@ -1,3 +1,4 @@
+# DEPRECATED — split into requirements/{base,prep,train,eval}.txt. Will be removed in a follow-up.
 absl-py==2.3.1
 accelerate==1.5.2
 aiohappyeyeballs==2.6.1

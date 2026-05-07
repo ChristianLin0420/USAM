@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: MIT
+# USAM smoke-test model — fits 8x A40 with bs=4 / GPU.
+# - DINOv3 ViT-B/14 (768-d) for all three modalities
+# - 12-layer MM-DiT, ~350M params
+# - Action chunk 8, depth/flow heads disabled to keep params low
+
+name: usam_350m_smoke
+
+encoder:
+  type: tri_dino
+  dinov3_ckpt: /datasets/dinov3/dinov3-vitb14-pretrain-lvd1689m
+  dinov3_arch: vit_b_14
+  # 27 * 14 = 378. ViT-B/14 patch grid 27×27 → 729 patches → 65-token cache.
+  image_size: 378
+  patch_size: 14
+  embed_dim: 768
+  num_register_tokens: 4
+  lora_rank: 8
+  lora_target_names: ["query", "key", "value"]
+  freeze_rgb_patch_embed: false
+  cache_n_keep_tokens: 64
+
+player:
+  action_model_type: DiT-B
+  num_layers: 12
+  hidden_size: 768
+  input_embedding_dim: 768
+  cross_attention_dim: 4096
+  output_dim: 768
+  positional_embeddings: rope
+  attention_bias: true
+  dropout: 0.0
+  activation_fn: gelu-approximate
+  norm_elementwise_affine: false
+  num_residual_streams: 1
+  final_norm: true
+  num_target_vision_tokens: 32
+  flash_attn: false       # keep simple on A40
+  qk_rmsnorm: true
+  # Smoke disables depth/flow heads; only RGB + action.
+  enable_proprio_cond: true
+  proprio_dim: 50
+  enable_depth_head: false
+  enable_flow_head: false
+
+action_head:
+  action_dim: 32
+  state_dim: 50
+  action_horizon: 8
+  noise_beta_alpha: 1.5
+  noise_beta_beta: 1.0
+  noise_s: 0.999
+  num_timestep_buckets: 1000
+  num_inference_timesteps: 4
+  max_num_embodiments: 4
+  obs_horizon: 4
+  num_views: 1
+  add_pos_embed: true
+
+conductor:
+  qwen_ckpt: /datasets/qwen3-vl-4b
+  n_plan_tokens: 32
+  player_d_model: 768
+  e_dim: 4096
+
+aux_heads:
+  geom:
+    enabled: false
+  flow_action:
+    enabled: false
+  drift:
+    enabled: true
+    rgb_dino_dim: 768
+    e_dim: 4096
+    hidden: 256
+  subtask:
+    enabled: true
+    p_hat_dim: 768
+    rgb_dino_dim: 768
+    hidden: 256

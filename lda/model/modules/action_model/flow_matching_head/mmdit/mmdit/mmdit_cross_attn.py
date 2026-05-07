@@ -380,12 +380,38 @@ class MMDiT(ModelMixin, ConfigMixin):
         # Output blocks
         self.action_proj_out = nn.Linear(self.inner_dim, self.config.output_dim)
         self.image_proj_out = nn.Linear(self.inner_dim, self.config.output_dim)
+
+        # USAM extensions ----------------------------------------------------
+        # Optional proprio modulation source for AdaLN-Zero (Edit 1).
+        # Gated by `enable_proprio_cond`; the projection input dim is
+        # provided via `proprio_dim` and defaults to 50 (the USAM-LeRobot
+        # padded state vector). When disabled the attribute is None and the
+        # forward path is identical to the original LDA-1B model.
+        self.enable_proprio_cond = bool(kwargs.get("enable_proprio_cond", False))
+        proprio_dim = int(kwargs.get("proprio_dim", 50))
+        self.proprio_proj = (
+            nn.Linear(proprio_dim, self.inner_dim) if self.enable_proprio_cond else None
+        )
+
+        # Optional depth/flow flow-matching heads (Edit 2). Gated by
+        # `enable_depth_head` / `enable_flow_head`. The smoke config
+        # disables them.
+        self.enable_depth_head = bool(kwargs.get("enable_depth_head", False))
+        self.enable_flow_head = bool(kwargs.get("enable_flow_head", False))
+        self.depth_proj_out = (
+            nn.Linear(self.inner_dim, self.config.output_dim) if self.enable_depth_head else None
+        )
+        self.flow_proj_out = (
+            nn.Linear(self.inner_dim, self.config.output_dim) if self.enable_flow_head else None
+        )
+        # --------------------------------------------------------------------
+
         print(
             "Total number of DiT parameters: ",
             sum(p.numel() for p in self.parameters() if p.requires_grad),
         )
 
-    def forward(    
+    def forward(
         self,
         *,
         image_tokens,
@@ -395,19 +421,23 @@ class MMDiT(ModelMixin, ConfigMixin):
         text_mask = None,
         time_cond = None,
         task_embedding = None,
+        proprio: Optional[Tensor] = None,
     ):
 
         if register_tokens is not None:
             image_tokens, packed_shape = pack([register_tokens, image_tokens], 'b * d')
         image_tokens = self.expand_streams(image_tokens)
         action_tokens = self.expand_streams(action_tokens)
-        
+
         text_tokens = self.text_attn_layernorm(text_tokens)
         # cond embedding
         if time_cond is not None:
             time_cond = self.timestep_encoder(time_cond)
             if task_embedding is not None:
                 time_cond += task_embedding
+            if proprio is not None and self.proprio_proj is not None:
+                # USAM: third modulation source (proprio embedding).
+                time_cond = time_cond + self.proprio_proj(proprio)
 
         for ind, block in enumerate(self.blocks):
 
@@ -428,10 +458,22 @@ class MMDiT(ModelMixin, ConfigMixin):
         action_tokens = self.action_norm(action_tokens)
         
         # proj to output dim
-        action_tokens = self.action_proj_out(action_tokens)
-        image_tokens = self.image_proj_out(image_tokens)
+        action_pred = self.action_proj_out(action_tokens)
+        image_pred = self.image_proj_out(image_tokens)
 
-        return image_tokens, action_tokens
+        # USAM: optional depth / flow heads share the image-branch features.
+        if self.depth_proj_out is not None or self.flow_proj_out is not None:
+            outputs: dict[str, Tensor] = {
+                "image_tokens": image_pred,
+                "action_tokens": action_pred,
+            }
+            if self.depth_proj_out is not None:
+                outputs["depth_tokens"] = self.depth_proj_out(image_tokens)
+            if self.flow_proj_out is not None:
+                outputs["flow_tokens"] = self.flow_proj_out(image_tokens)
+            return outputs
+
+        return image_pred, action_pred
 
 def test_mmdit():
     device = "cpu"

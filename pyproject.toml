@@ -3,15 +3,15 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "LDA"
+name = "usam"
 authors = [
     {name = "Jiangran Lyu", email="jiangran.lyu@stu.pku.edu.cn"},
     {name = "Kai Liu", email="liukai2025@ia.ac.cn"},
     {name = "Xuheng Zhang", email="catburg.zxh@gmail.com"},
 
 ]
-description = "LDA-1B: Scaling Latent Dynamics Action Model via Universal Embodied Data Ingestion."
-version = "1.0.1"
+description = "USAM: Unified Spatial Action Model — tri-modal World-Action Model with cached hierarchical planning, built as an overlay on LDA-1B."
+version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.10"
 keywords = ["vision-language-actions models", " robotic manipulation", "multimodal pretraining", "robot learning", "generative models"]
@@ -26,16 +26,49 @@ classifiers = [
 "Programming Language :: Python :: 3 :: Only",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# Runtime deps shared across all environments live in requirements/base.txt.
+# Tier-specific extras below pin the same files used by docker/Dockerfile.*.
 dependencies = [
 ]
 
 [project.optional-dependencies]
+# Phase A (T1 — A100 Slurm prep): downloading, flow/depth, DINO caching, HF upload.
+prep = [
+    "sea-raft",
+    "depth-anything-v2",
+    "decord",
+    "huggingface-hub[hf_xet,cli]",
+    "hf_transfer",
+    "safetensors",
+    "opencv-python",
+    "tensorflow-datasets",
+]
+# Phase B (T0 / T2 — A40 dev or H200 burst training).
+# Note: flash-attn==2.6.3 must be installed via the Dockerfile with
+# `pip install --no-build-isolation flash-attn==2.6.3` (it has a non-standard
+# build flow that pip-resolves cannot satisfy here). transformer-engine is
+# H200-only and intentionally optional; install it inside the H200 image.
+train = [
+    "wandb",
+    "torchmetrics",
+]
+# Phase C (T3 — sim + real-robot eval).
+eval = [
+    # libero is installed from source; see docker/Dockerfile.* and HOWTO_*.md.
+    # See https://github.com/Lifelong-Robot-Learning/LIBERO for install instructions.
+    "robosuite",
+    "robocasa",
+]
+# `pip install -e ".[dev]"` installs everything plus lint/test tooling.
 dev = [
     "black>=24.2.0",
     "gpustat",
     "ipython",
     "pre-commit",
     "ruff>=0.2.2",
+    "pytest>=8.0",
+    "pytest-xdist",
+    "usam[prep,train,eval]",
 ]
 sagemaker = [
     "boto3",
@@ -84,3 +117,14 @@ ignore = ["F722"]
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["E402", "F401"]
+
+[tool.pytest.ini_options]
+# Test markers used across the suite. `gpu_1`, `gpu_8`, `network`, and `slow`
+# are populated with tests by the test-engineer in Wave 4; CI filters them
+# out so this file is the canonical declaration.
+markers = [
+    "gpu_1: requires a single GPU",
+    "gpu_8: requires 8 GPUs",
+    "network: requires network access (HF Hub, GCS, etc.)",
+    "slow: takes >10 s to run",
+]

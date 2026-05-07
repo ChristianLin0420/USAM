@@ -1,0 +1,25 @@
+# USAM Phase A (T1 — A100 Slurm prep) deps.
+# Installed on top of requirements/base.txt by docker/Dockerfile.prep_a100.
+#
+# Phase A is download → flow/depth compute → DINO caching → HF upload.
+# These deps are NOT needed at training (T2) or eval (T3) time.
+
+# --- optical flow (SEA-RAFT) ---
+sea-raft
+
+# --- depth (Depth-Anything-V2) ---
+depth-anything-v2
+
+# --- video decoding for prep workers ---
+decord
+opencv-python
+
+# --- HF Hub upload daemon (CommitScheduler + upload_large_folder) ---
+# `hf_xet` and the CLI extras enable the high-perf transfer path used by
+# prep/_hub.py.
+huggingface-hub[hf_xet,cli]
+hf_transfer
+safetensors
+
+# --- RLDS readers (DROID, Bridge, OXE-AugE) ---
+tensorflow-datasets

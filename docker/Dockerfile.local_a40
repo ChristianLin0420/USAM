@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MIT
+# USAM — local 8xA40 dev image (T0).
+#
+# Smallest of the three USAM images. Used for:
+#   * unit + integration tests on a single 8xA40 node
+#   * `tests/integration/test_smoke_train.py` — 100-step train on the
+#     `tiny_*` golden fixtures
+#   * inference smoke loop at <=10 Hz (full 30 Hz needs H200)
+#
+# Build:
+#   docker build -f docker/Dockerfile.local_a40 -t usam:local-a40 .
+
+FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# --- system deps ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 python3.10-venv python3.10-dev python3-pip \
+        git git-lfs ffmpeg \
+        libgl1-mesa-glx libglib2.0-0 \
+        wget curl ca-certificates build-essential \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && git lfs install \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/USAM
+
+# --- python deps (layer cached on requirements files) ---
+COPY pyproject.toml ./
+COPY requirements/base.txt requirements/base.txt
+COPY requirements/train.txt requirements/train.txt
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -r requirements/base.txt \
+    && pip install -r requirements/train.txt
+
+# flash-attn must be built against an already-installed torch; cannot be
+# resolved via requirements.txt. Pin matches LDA-1B's tested version.
+RUN pip install --no-build-isolation flash-attn==2.6.3
+
+# --- project source ---
+COPY . .
+RUN pip install -e .
+
+ENV PYTHONPATH=/workspace/USAM
+CMD ["bash"]

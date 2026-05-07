@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: MIT
+# USAM — Phase B training image (T2, 500xH200 burst).
+#
+# Built on the NGC PyTorch container so transformer-engine (FP8 kernels) is
+# pre-installed and ABI-matched against the container's CUDA/cuDNN/NCCL.
+#
+# Build:
+#   docker build -f docker/Dockerfile.train_h200 -t usam:train-h200 .
+
+FROM nvcr.io/nvidia/pytorch:25.01-py3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# --- system deps (most are already in the NGC base image) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git git-lfs ffmpeg \
+        libgl1-mesa-glx libglib2.0-0 \
+    && git lfs install \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/USAM
+
+# --- python deps ---
+# The NGC image ships torch + transformer-engine. We do NOT reinstall torch
+# from requirements/base.txt's pin; pip will see a satisfied version. If pip
+# tries to upgrade torch and breaks the TE ABI, drop the torch line in
+# requirements/base.txt or use --no-deps for that single package.
+COPY pyproject.toml ./
+COPY requirements/base.txt requirements/base.txt
+COPY requirements/train.txt requirements/train.txt
+RUN pip install --upgrade pip setuptools wheel \
+    && pip install -r requirements/base.txt \
+    && pip install -r requirements/train.txt
+
+# flash-attn must be built against the already-installed torch.
+RUN pip install --no-build-isolation flash-attn==2.6.3
+
+# --- project source ---
+COPY . .
+RUN pip install -e .
+
+# NCCL tuning for H200 NVLink + IB fabric (overridable at runtime).
+ENV NCCL_IB_HCA=mlx5 \
+    NCCL_SOCKET_IFNAME=^lo,docker0 \
+    PYTHONPATH=/workspace/USAM
+
+CMD ["bash"]

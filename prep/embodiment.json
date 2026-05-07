@@ -1,0 +1,52 @@
+{
+  "version": "0.1.0",
+  "comment": "Per-embodiment rule for converting action_native -> action_canonical_ee[7]. Phase 1 ships DROID; the remaining entries are placeholders that pipeline-engineer's stage_3 will exercise once Phase 2 lands. Each rule has 'kind' and per-kind parameters; see prep.stage_3_canonical for the implementations.",
+  "embodiments": {
+    "droid_franka": {
+      "kind": "ee_velocity_passthrough",
+      "native_dim": 7,
+      "ee_dim": 7,
+      "indices": {
+        "linear_velocity_xyz": [0, 1, 2],
+        "angular_velocity_xyz": [3, 4, 5],
+        "gripper": 6
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      }
+    },
+    "agibot_g1": {
+      "kind": "joint_to_ee_fk_stub",
+      "native_dim": 24,
+      "ee_dim": 7,
+      "_phase2_stub": true
+    },
+    "rh20t_franka": {
+      "kind": "joint_to_ee_fk_stub",
+      "native_dim": 7,
+      "ee_dim": 7,
+      "_phase2_stub": true
+    },
+    "robomind_tien_kung": {
+      "kind": "joint_to_ee_fk_stub",
+      "native_dim": 14,
+      "ee_dim": 7,
+      "_phase2_stub": true
+    },
+    "bridge_widowx": {
+      "kind": "ee_velocity_passthrough",
+      "native_dim": 7,
+      "ee_dim": 7,
+      "_phase2_stub": true
+    },
+    "oxe_auge_generic": {
+      "kind": "manifest_per_source",
+      "native_dim": 32,
+      "ee_dim": 7,
+      "_phase2_stub": true
+    }
+  }
+}
