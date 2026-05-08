@@ -1,0 +1,32 @@
+# SPDX-License-Identifier: MIT
+# OXE-AugE camera key -> canonical key, per sub-source.
+# Authoritative source is the per-sub-source `manifest.<name>.camera_map`
+# block in configs/data/oxe_auge.yaml. We mirror the most common entries
+# here as a fallback so a converter can still load when the manifest is
+# unavailable.
+
+mapping:
+  image:        head_rgb
+  rgb:          head_rgb
+  rgb_static:   head_rgb
+  rgb_gripper:  wrist_rgb
+  hand_image:   wrist_rgb
+  wrist_image:  wrist_rgb
+
+# Per-sub-source overrides — matched first when the converter knows which
+# sub-source it is processing.
+fractal20220817_data:
+  image: head_rgb
+
+kuka:
+  image: head_rgb
+
+taco_play:
+  rgb_static:  head_rgb
+  rgb_gripper: wrist_rgb
+
+jaco_play:
+  image: head_rgb
+
+berkeley_cable_routing:
+  image: head_rgb

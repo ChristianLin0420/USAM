@@ -85,6 +85,29 @@ def load_embodiment_registry(path: Path | None = None) -> Dict[str, CanonicalRul
 
 # ----- per-kind canonicalizers ------------------------------------------------
 
+# All bounds applied here are documented in embodiment.json; we centralize
+# clipping in a single helper so every kind has identical post-conditions.
+_LIN_BOUND: float = 2.0
+_ANG_BOUND: float = math.pi
+
+
+def _clip_to_canonical_bounds(canon: np.ndarray) -> np.ndarray:
+    """Clip the [T, 7] canonical-EE tensor to the documented bounds.
+
+    Linear velocity to ±2 m/s, angular velocity to ±π rad/s, gripper to [0, 1].
+    Clipping (rather than rejecting) is appropriate here because (a) finite-
+    difference rules can spike on a single bad frame and (b) the validator in
+    ``validate_action_canonical`` enforces the same bounds with a tiny epsilon,
+    so we want to stay strictly inside.
+    """
+    assert canon.ndim == 2 and canon.shape[1] == 7, canon.shape
+    out = canon.copy()
+    out[:, 0:3] = np.clip(out[:, 0:3], -_LIN_BOUND, _LIN_BOUND)
+    out[:, 3:6] = np.clip(out[:, 3:6], -_ANG_BOUND, _ANG_BOUND)
+    out[:, 6] = np.clip(out[:, 6], 0.0, 1.0)
+    return out
+
+
 def _canon_ee_velocity_passthrough(
     action_native: np.ndarray, params: Mapping[str, object]
 ) -> np.ndarray:
@@ -116,17 +139,113 @@ def _canon_ee_velocity_passthrough(
     return canonical * scale
 
 
-def _canon_phase2_stub(action_native: np.ndarray, params: Mapping[str, object]) -> np.ndarray:
-    raise NotImplementedError(
-        "This embodiment's canonicalization is a Phase 2 deliverable. "
-        "See docs/IMPLEMENTATION_PLAN.md §11.18."
-    )
+def _canon_ee_pose_finite_diff(
+    action_native: np.ndarray, params: Mapping[str, object]
+) -> np.ndarray:
+    """Pose-stream rule: native action is [pos_xyz, rotvec_xyz, gripper] at fps.
+
+    We finite-difference (forward diff with last-frame replicate) to get a
+    velocity-style canonical action. The gripper is NOT differentiated; it is
+    passed through as-is and clipped to [0, 1].
+
+    Used for RH20T (fps=10) and provided as a reusable building block for any
+    embodiment whose native control loop ships pose targets rather than
+    velocities.
+    """
+    assert action_native.ndim == 2, f"expected [T, D], got {action_native.shape}"
+    indices = params["indices"]  # type: ignore[index]
+    pos = action_native[:, indices["ee_position_xyz"]].astype(np.float32)  # type: ignore[index]
+    rot = action_native[:, indices["ee_rotvec_xyz"]].astype(np.float32)  # type: ignore[index]
+    grip = action_native[:, int(indices["gripper"])][:, None].astype(np.float32)  # type: ignore[index]
+
+    fps = float(params.get("fps", 10))
+    dt = 1.0 / max(fps, 1e-3)
+
+    T = pos.shape[0]
+    if T < 2:
+        lin_vel = np.zeros_like(pos)
+        ang_vel = np.zeros_like(rot)
+    else:
+        lin_vel = np.zeros_like(pos)
+        ang_vel = np.zeros_like(rot)
+        lin_vel[:-1] = (pos[1:] - pos[:-1]) / dt
+        lin_vel[-1] = lin_vel[-2]
+        # Wrap the rotvec delta into [-π, π] to handle ±π crossings.
+        rot_delta = rot[1:] - rot[:-1]
+        rot_delta = (rot_delta + math.pi) % (2 * math.pi) - math.pi
+        ang_vel[:-1] = rot_delta / dt
+        ang_vel[-1] = ang_vel[-2]
+
+    scale = np.asarray(params.get("scale", [1.0] * 7), dtype=np.float32)
+    assert scale.shape == (7,), scale.shape
+    canon = np.concatenate([lin_vel, ang_vel, grip], axis=1) * scale
+    return _clip_to_canonical_bounds(canon)
+
+
+def _canon_joint_position_to_ee_finite_diff(
+    action_native: np.ndarray, params: Mapping[str, object]
+) -> np.ndarray:
+    """Joint-position stream rule: native columns are joint targets, not EE.
+
+    Pure FK is embodiment-specific (urdf needed). The contract here is that
+    the converter has already produced an EE-frame velocity stream and stored
+    it in the FIRST 7 padded columns of the parquet's ``action_native``; this
+    rule then becomes a finite-difference passthrough on those 7 columns. If
+    fewer than 7 columns are present we raise — that means the converter did
+    not pre-compute the EE stream, which is a bug.
+
+    Returns
+    -------
+    np.ndarray
+        ``[T, 7]`` fp32, clipped to canonical bounds.
+    """
+    assert action_native.ndim == 2, f"expected [T, D], got {action_native.shape}"
+    if action_native.shape[1] < 7:
+        raise ValueError(
+            "joint_position_to_ee_finite_diff expects the first 7 columns of "
+            "action_native to be the converter-produced EE-velocity stream; "
+            f"got only {action_native.shape[1]} columns. The converter for this "
+            "embodiment must populate them upstream of stage_3."
+        )
+    canon = action_native[:, :7].astype(np.float32)
+    scale = np.asarray(params.get("scale", [1.0] * 7), dtype=np.float32)
+    assert scale.shape == (7,), scale.shape
+    return _clip_to_canonical_bounds(canon * scale)
+
+
+def _canon_joint_delta_to_ee_finite_diff(
+    action_native: np.ndarray, params: Mapping[str, object]
+) -> np.ndarray:
+    """Bimanual joint-delta rule (AgiBot G1): converter pre-fills first 7 cols.
+
+    Same contract as :func:`_canon_joint_position_to_ee_finite_diff`: the
+    converter is responsible for producing the canonical EE stream and storing
+    it in the first 7 padded columns of ``action_native``. This rule is then a
+    scaled passthrough.
+    """
+    return _canon_joint_position_to_ee_finite_diff(action_native, params)
+
+
+def _canon_manifest_per_source(
+    action_native: np.ndarray, params: Mapping[str, object]
+) -> np.ndarray:
+    """OXE-AugE rule: per-sub-source manifest selects the format.
+
+    For mixed collections we cannot dispatch by embodiment string alone — the
+    OXE-AugE manifest carries a per-source action_format that the converter
+    consumed to pre-fill the first 7 padded columns. Stage_3 therefore reads
+    those 7 columns directly. Same passthrough contract as the joint-stream
+    rules above.
+    """
+    return _canon_joint_position_to_ee_finite_diff(action_native, params)
 
 
 _KIND_DISPATCH: Dict[str, Callable[[np.ndarray, Mapping[str, object]], np.ndarray]] = {
     "ee_velocity_passthrough": _canon_ee_velocity_passthrough,
-    "joint_to_ee_fk_stub": _canon_phase2_stub,
-    "manifest_per_source": _canon_phase2_stub,
+    "ee_pose_finite_diff": _canon_ee_pose_finite_diff,
+    "joint_position_to_ee_finite_diff": _canon_joint_position_to_ee_finite_diff,
+    "joint_delta_to_ee_finite_diff": _canon_joint_delta_to_ee_finite_diff,
+    "manifest_per_source": _canon_manifest_per_source,
 }
 
 
@@ -160,8 +279,12 @@ def canonicalize_action(
         raise KeyError(f"unknown embodiment {embodiment!r}; have {sorted(reg)}")
     rule = reg[embodiment]
     if rule.is_stub:
+        # Defensive fallback — the registry should no longer carry stubs after
+        # Phase 2, but leave the message here in case someone re-introduces one.
         raise NotImplementedError(
-            f"embodiment {embodiment!r} is a Phase 2 stub; see prep.stage_3_canonical"
+            f"embodiment {embodiment!r} is marked as a Phase 2 stub; "
+            "remove the _phase2_stub flag from prep/embodiment.json once a real "
+            "rule is in place."
         )
     if action_native.shape[1] < rule.native_dim:
         raise ValueError(

@@ -1,0 +1,56 @@
+# SPDX-License-Identifier: MIT
+# DROID source config — Phase 1 deliverable.
+# See docs/IMPLEMENTATION_PLAN.md §5 and §11.15 (DROID).
+
+source: droid
+repo_id: "<org>/usam-droid"
+embodiment: droid_franka
+fps_native: 15
+fps_features: 5            # cache fps (5 Hz, plan §6.x)
+fps_action: 15             # native action fps for DROID
+
+# Stage 0 / RLDS download
+download:
+  rlds_data_dir: "gs://gresearch/robotics"
+  karlp_droid_repo: "KarlP/droid"   # cleaner language annotations
+  use_karlp_language: true          # prefer cleaner annotations over RLDS
+
+# Stage 2a conversion
+convert:
+  cameras:
+    - head_rgb
+    - wrist_rgb
+  action_dim_native: 7
+  action_dim_padded: 32
+  state_dim_padded: 50
+
+# Stage 2b flow
+flow:
+  # 378 = 27 * 14, so ViT-B/14 produces a 27x27=729 patch grid (canonical, per
+  # IMPLEMENTATION_PLAN.md §11.1). The plan colloquially refers to this as
+  # "384²"; we use 378 to keep the patch count integer.
+  target_hw: [378, 378]
+  iters: 12
+  fp16: true
+
+# Stage 2c depth
+depth:
+  path: dav2                # Phase 1: DAv2 fallback (mono)
+  target_hw: [192, 192]
+  max_range_mm: 5000
+  fp16: true
+  low_quality: true         # mono DAv2 is "low quality" per §11.17
+
+# Stage 4 DINO cache
+dino_cache:
+  target_hw: [378, 378]   # see flow.target_hw note above
+  n_keep_tokens: 64
+  cache_fps: 5
+  fp16: true
+
+# Mixture weight (used when DROID is part of a multi-source loader)
+mixture_weight: 0.15
+
+# Camera serial -> canonical key map (DROID's RLDS uses fixed names so
+# the map is trivial; kept here for symmetry with other sources).
+camera_map_path: "configs/data/camera_maps/droid.yaml"

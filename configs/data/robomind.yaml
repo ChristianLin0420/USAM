@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+# RoboMIND source config — Phase 2 deliverable.
+# See docs/IMPLEMENTATION_PLAN.md §5 and §11.15 (RoboMIND).
+
+source: robomind
+repo_id: "<org>/usam-robomind"
+embodiment: robomind_tien_kung
+fps_native: 25
+fps_features: 5
+fps_action: 25
+
+download:
+  # RoboMIND ships HDF5 trajectories under per-embodiment subdirs.
+  raw_root: "/scratch/usam/robomind/raw"
+  drop_simulation: true   # we never train on h5_simulation
+
+convert:
+  cameras:
+    - head_rgb
+    - wrist_rgb_left
+    - wrist_rgb_right
+  action_dim_native: 14   # bimanual joint positions (7 + 7)
+  action_dim_padded: 32
+  state_dim_padded: 50
+  # CRITICAL — RoboMIND ships frames in BGR. The converter hard-asserts
+  # this via a sample-frame heuristic (blue-channel mean exceeds red-channel
+  # by ROBOMIND_BGR_THRESHOLD), then runs cv2.cvtColor(..., COLOR_BGR2RGB).
+  # If the heuristic is ambiguous we abort the chunk rather than silently
+  # ship miscoloured pixels. See prep/stage_2a_to_lerobot/robomind.py.
+  bgr_to_rgb: true
+  bgr_detect_threshold: 5.0
+
+flow:
+  target_hw: [378, 378]
+  iters: 12
+  fp16: true
+
+depth:
+  path: dav2
+  target_hw: [192, 192]
+  max_range_mm: 5000
+  fp16: true
+  low_quality: true
+
+dino_cache:
+  target_hw: [378, 378]
+  n_keep_tokens: 64
+  cache_fps: 5
+  fp16: true
+
+mixture_weight: 0.15
+
+camera_map_path: "configs/data/camera_maps/robomind.yaml"

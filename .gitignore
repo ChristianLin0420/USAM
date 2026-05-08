@@ -151,6 +151,9 @@ dmypy.json
 # Caches and Datasets
 cache/
 data/
+# USAM keeps per-source data configs under configs/data/ — those are checked in.
+!configs/data/
+!configs/data/**
 playground/Models
 =4.43.2
 

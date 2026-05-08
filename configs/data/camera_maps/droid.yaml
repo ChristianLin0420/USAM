@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# DROID camera_serial -> canonical camera key.
+# DROID's RLDS exposes named keys rather than serial numbers, so this is a
+# direct rename map. See prep/stage_2a_to_lerobot/droid.py:DROID_CAMERA_MAP.
+
+mapping:
+  exterior_image_1_left: head_rgb
+  wrist_image_left:      wrist_rgb
+
+# Optional secondary views — kept so Phase 2 can promote them per-embodiment.
+optional:
+  exterior_image_2_left: head_rgb_aux
+  wrist_image_right:     wrist_rgb_right

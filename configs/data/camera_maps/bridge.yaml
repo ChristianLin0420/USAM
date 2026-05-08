@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# BridgeData V2 camera key -> canonical key.
+# Bridge's RLDS exposes 4 image keys (image_0..image_3); we keep image_0
+# (over-the-shoulder) and image_2 (wrist). image_1 and image_3 are
+# auxiliary and dropped.
+
+mapping:
+  image_0: head_rgb
+  image_2: wrist_rgb
+
+optional:
+  image_1: head_rgb_aux
+  image_3: side_rgb

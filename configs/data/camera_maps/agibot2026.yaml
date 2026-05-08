@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: MIT
+# AgiBot World 2026 camera key -> canonical key.
+# AgiBot's parquet exposes named keys, not serials. See
+# prep/stage_2a_to_lerobot/agibot2026.py:AGIBOT_CAMERA_MAP.
+
+mapping:
+  head:       head_rgb
+  hand_left:  wrist_rgb_left
+  hand_right: wrist_rgb_right
+
+# Optional secondary views — kept for Phase 3.
+optional:
+  body_left:  body_rgb_left
+  body_right: body_rgb_right

@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: MIT
+# RH20T camera serial -> canonical key, per robot configuration.
+# Each cfgN tarball has its own set of camera serials documented in
+# https://github.com/rh20t/rh20t_dataset/blob/main/dataset/cam_info.json.
+# We mirror the cam_info entries here so the converter can dispatch by
+# (config, serial) -> canonical name.
+
+# Default fallback used when a serial is not listed under any specific
+# config block; the converter walks `mapping`, then `cfg<n>` overrides.
+mapping:
+  cam_036422060215: head_rgb
+  cam_037522250485: head_rgb
+  cam_038122062234: head_rgb
+  cam_104122061831: wrist_rgb
+  cam_104422071073: wrist_rgb
+
+# Per-config overrides (RH20T cfg1..cfg7). Serials below are placeholder
+# anchors; replace with the real per-config table from rh20t cam_info.json.
+RH20T_cfg1:
+  cam_036422060215: head_rgb
+  cam_104122061831: wrist_rgb
+
+RH20T_cfg2:
+  cam_037522250485: head_rgb
+  cam_104422071073: wrist_rgb
+
+RH20T_cfg3:
+  cam_038122062234: head_rgb
+  cam_104122061831: wrist_rgb
+
+# Optional secondary views, gated behind a flag in the converter.
+optional:
+  cam_104122062295: side_rgb

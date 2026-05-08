@@ -1,6 +1,6 @@
 {
-  "version": "0.1.0",
-  "comment": "Per-embodiment rule for converting action_native -> action_canonical_ee[7]. Phase 1 ships DROID; the remaining entries are placeholders that pipeline-engineer's stage_3 will exercise once Phase 2 lands. Each rule has 'kind' and per-kind parameters; see prep.stage_3_canonical for the implementations.",
+  "version": "0.2.0",
+  "comment": "Per-embodiment rule for converting action_native -> action_canonical_ee[7]. Canonical EE frame: [lin_vel_xyz (m/s), ang_vel_xyz (rad/s), gripper (0=open, 1=closed)]. Each rule has 'kind' and per-kind parameters; see prep.stage_3_canonical for the implementations.",
   "embodiments": {
     "droid_franka": {
       "kind": "ee_velocity_passthrough",
@@ -19,34 +19,92 @@
       }
     },
     "agibot_g1": {
-      "kind": "joint_to_ee_fk_stub",
+      "kind": "joint_delta_to_ee_finite_diff",
       "native_dim": 24,
       "ee_dim": 7,
-      "_phase2_stub": true
+      "comment": "AgiBot G1 native action is a 24-D bimanual arm+hand command. We canonicalize using the right-arm EE-pose stream from the parquet `observation.state` columns and finite-difference it. Stage_3 reads the pre-computed EE-frame velocities supplied by the converter (which already returns action_canonical_ee[T, 7]) and only re-validates here. The 'indices' below define the right-arm EE columns inside action_native if a downstream caller wants to redo the diff.",
+      "indices": {
+        "right_ee_position_xyz": [0, 1, 2],
+        "right_ee_rotvec_xyz": [3, 4, 5],
+        "right_gripper": 6
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      },
+      "fps": 30
     },
     "rh20t_franka": {
-      "kind": "joint_to_ee_fk_stub",
+      "kind": "ee_pose_finite_diff",
       "native_dim": 7,
       "ee_dim": 7,
-      "_phase2_stub": true
+      "comment": "RH20T's action is a 6-DoF EE pose (xyz + axis-angle) plus gripper. We finite-difference consecutive poses to get EE velocity, leaving gripper as-is.",
+      "indices": {
+        "ee_position_xyz": [0, 1, 2],
+        "ee_rotvec_xyz": [3, 4, 5],
+        "gripper": 6
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      },
+      "fps": 10
     },
     "robomind_tien_kung": {
-      "kind": "joint_to_ee_fk_stub",
+      "kind": "joint_position_to_ee_finite_diff",
       "native_dim": 14,
       "ee_dim": 7,
-      "_phase2_stub": true
+      "comment": "RoboMIND Tien Kung native action is bimanual joint positions (7+7). We expect the converter to have already produced action_canonical_ee from the per-frame EE pose streams (TF tree from urdf). Stage_3 only re-validates.",
+      "indices": {
+        "left_arm_joints": [0, 1, 2, 3, 4, 5, 6],
+        "right_arm_joints": [7, 8, 9, 10, 11, 12, 13]
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      },
+      "fps": 25
     },
     "bridge_widowx": {
       "kind": "ee_velocity_passthrough",
       "native_dim": 7,
       "ee_dim": 7,
-      "_phase2_stub": true
+      "comment": "BridgeData V2 native action is already 6-DoF delta-pose + gripper at 5 Hz. We pass through and treat the deltas as approximate velocities (the dt is the same across all frames).",
+      "indices": {
+        "linear_velocity_xyz": [0, 1, 2],
+        "angular_velocity_xyz": [3, 4, 5],
+        "gripper": 6
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      },
+      "fps": 5
     },
     "oxe_auge_generic": {
       "kind": "manifest_per_source",
       "native_dim": 32,
       "ee_dim": 7,
-      "_phase2_stub": true
+      "comment": "OXE-AugE is a meta-collection. The per-source canonicalization is selected from the manifest `action_format` field (one of: ee_velocity_passthrough, ee_pose_finite_diff, joint_position_to_ee_finite_diff). The first 7 padded columns of action_native are reserved for the canonical EE channel; the converter pre-fills them so stage_3 is a passthrough.",
+      "indices": {
+        "linear_velocity_xyz": [0, 1, 2],
+        "angular_velocity_xyz": [3, 4, 5],
+        "gripper": 6
+      },
+      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+      "bounds": {
+        "linear_velocity": [-2.0, 2.0],
+        "angular_velocity": [-3.141592653589793, 3.141592653589793],
+        "gripper": [0.0, 1.0]
+      }
     }
   }
 }

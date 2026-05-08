@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT
+# BridgeData V2 source config — Phase 2 deliverable.
+# See docs/IMPLEMENTATION_PLAN.md §5 and §11.15 (Bridge).
+
+source: bridge
+repo_id: "<org>/usam-bridge"
+embodiment: bridge_widowx
+fps_native: 5
+fps_features: 5
+fps_action: 5
+
+download:
+  rlds_data_dir: "gs://gresearch/robotics"
+  rlds_dataset_name: "bridge"
+
+convert:
+  cameras:
+    - head_rgb
+    - wrist_rgb       # only present when image_2 is shipped (~70% of episodes)
+  action_dim_native: 7
+  action_dim_padded: 32
+  state_dim_padded: 50
+
+flow:
+  target_hw: [378, 378]
+  iters: 12
+  fp16: true
+
+depth:
+  path: dav2
+  target_hw: [192, 192]
+  max_range_mm: 5000
+  fp16: true
+  low_quality: true
+
+dino_cache:
+  target_hw: [378, 378]
+  n_keep_tokens: 64
+  cache_fps: 5
+  fp16: true
+
+# Bridge action chunk size: at 5 Hz we predict 4 future steps to match other
+# sources' ~0.8 s prediction horizon (16 steps at 30 Hz).
+action_chunk_native: 4
+
+mixture_weight: 0.10
+
+camera_map_path: "configs/data/camera_maps/bridge.yaml"

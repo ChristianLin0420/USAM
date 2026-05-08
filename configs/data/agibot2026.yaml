@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: MIT
+# AgiBot World 2026 source config — Phase 2 deliverable.
+# See docs/IMPLEMENTATION_PLAN.md §5 and §11.15 (AgiBot 2026).
+
+source: agibot2026
+repo_id: "<org>/usam-agibot2026"
+embodiment: agibot_g1
+fps_native: 30
+fps_features: 5
+fps_action: 30
+
+download:
+  hub_repo_id: "agibot-world/AgiBot-World-2026"
+  hub_repo_type: "dataset"
+
+# Stage 2a conversion
+convert:
+  cameras:
+    - head_rgb
+    - wrist_rgb_left
+    - wrist_rgb_right
+  action_dim_native: 24
+  action_dim_padded: 32
+  state_dim_padded: 50
+  # AgiBot's parquet ships an `instruction_segments` column. We promote it to
+  # top-level columns level_1, level_2, level_3 so the subtask classifier
+  # head has direct ground truth. See prep.stage_2a_to_lerobot.agibot2026.
+  promote_instruction_segments: true
+
+flow:
+  target_hw: [378, 378]   # 27 * 14 patches; see DROID config note
+  iters: 12
+  fp16: true
+
+depth:
+  path: dav2              # AgiBot ships some 16-bit PNG depth — use DAv2
+                          # while the depth_consistency_mask is wired up
+  target_hw: [192, 192]
+  max_range_mm: 5000
+  fp16: true
+  low_quality: false
+
+dino_cache:
+  target_hw: [378, 378]
+  n_keep_tokens: 64
+  cache_fps: 5
+  fp16: true
+
+mixture_weight: 0.30
+
+camera_map_path: "configs/data/camera_maps/agibot2026.yaml"

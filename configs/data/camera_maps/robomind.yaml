@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: MIT
+# RoboMIND camera key -> canonical key.
+# RoboMIND HDF5 stores cameras under observations/images/<cam_name>; the
+# converter looks names up directly. See
+# prep/stage_2a_to_lerobot/robomind.py:ROBOMIND_CAMERA_MAP.
+
+mapping:
+  head_cam:        head_rgb
+  left_wrist_cam:  wrist_rgb_left
+  right_wrist_cam: wrist_rgb_right
+
+# Aliases occasionally found in older RoboMIND dumps.
+aliases:
+  cam_high:    head_rgb
+  cam_low:     head_rgb
+  cam_left:    wrist_rgb_left
+  cam_right:   wrist_rgb_right
