@@ -64,6 +64,7 @@ def _moving_average(xs: list[float], window: int) -> list[float]:
     return out
 
 
+@pytest.mark.slow
 def test_smoke_train_cpu_plumbing(tiny_droid_root: Path, tmp_path: Path, caplog) -> None:
     """5-step CPU plumbing run. No GPUs, no flash-attn, no transformer-engine.
 
@@ -72,6 +73,10 @@ def test_smoke_train_cpu_plumbing(tiny_droid_root: Path, tmp_path: Path, caplog)
     → optimizer.step. The loss only needs to be **finite**; with five
     steps on a tiny synthetic fixture there is no statistical
     expectation of monotonic decrease.
+
+    Marked ``slow`` because the wall-clock budget is 60 s — CI's PR pipeline
+    skips ``slow`` to stay under its 5-min total budget. Run nightly
+    (``-m slow``) or before tagging a release.
     """
     caplog.set_level(logging.INFO, logger="usam.train")
 

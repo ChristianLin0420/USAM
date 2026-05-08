@@ -76,7 +76,10 @@ class TriDinoConfig:
 
     dinov3_ckpt: str = ""
     dinov3_arch: str = "vit_b_14"
-    image_size: int = 384
+    # 27 * 14 = 378; preserves the canonical 27x27=729 patch grid that the
+    # cache + plan reference. The plan colloquially says "384²"; YAMLs
+    # already override to 378. Default matches the binding contract.
+    image_size: int = 378
     patch_size: int = 14
     embed_dim: int = 768
     num_register_tokens: int = 4

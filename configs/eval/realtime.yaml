@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: MIT
+# Real-time inference benchmark config.
+#
+# Wave-4 charter (inference-engineer):
+# * Two paired runs: cache_enabled = true | false.
+# * Per-step wall-clock recorded; report steps/sec for each run plus the
+#   speedup ratio.
+# * Output JSON keys (locked):
+#       steps_per_sec_cached, steps_per_sec_uncached,
+#       speedup_ratio, cache_refresh_count, total_steps.
+
+name: realtime_benchmark
+
+# ---------------------------------------------------------------------------
+# Realtime loop knobs (consumed by usam.inference.realtime.RealtimeController)
+# ---------------------------------------------------------------------------
+realtime:
+  target_hz: 30           # the 30 Hz control budget used in §4.4 of the plan
+  steps_per_scenario: 100 # control steps per scenario
+  num_scenarios: 10       # 10 scenarios × 100 steps = 1_000 timed steps per cell
+
+  # Paired runs. Each entry produces one timed pass. The reported speedup
+  # ratio is (steps_per_sec_cached / steps_per_sec_uncached).
+  runs:
+    - name: cached
+      cache_enabled: true
+    - name: uncached
+      cache_enabled: false
+
+  drift:
+    tau_hard: 0.20
+    tau_soft: 0.06
+    timer_hard: 60        # 2 s @ 30 Hz
+    timer_soft: 30        # 1 s @ 30 Hz
+
+# ---------------------------------------------------------------------------
+# Output JSON schema (locked) — every key MUST be present in the artifact.
+# ---------------------------------------------------------------------------
+output_schema:
+  - steps_per_sec_cached
+  - steps_per_sec_uncached
+  - speedup_ratio
+  - cache_refresh_count
+  - total_steps
+
+# ---------------------------------------------------------------------------
+# Player / Conductor sizes used by the benchmark (matches the smoke config so
+# the timing run can be exercised on T0 8×A40 without a full 1.4B model).
+# ---------------------------------------------------------------------------
+model:
+  hidden_size: 256
+  num_layers: 2
+  num_heads: 4
+  action_dim: 7
+  action_chunk: 8
+  rgb_dim: 768
+  depth_dim: 768
+  flow_dim: 768
+  proprio_dim: 50
+  n_plan_tokens: 32
+  e_proj_dim: 64

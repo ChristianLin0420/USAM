@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Tuple, Optional
+from typing import Any, Mapping, Tuple, Optional
 
 import torch
 from torch import nn
@@ -51,6 +51,123 @@ class MultiHeadRMSNorm(Module):
 
 # class
 
+def _kv_from_cache(
+    kv_cache: Any,
+    layer_idx: int,
+    branch: str,
+) -> Tuple[Tensor, Tensor]:
+    """Look up ``(K, V)`` for ``layer_idx`` / ``branch`` from a kv_cache.
+
+    Accepts two shapes:
+
+    * A mapping keyed by ``(layer_idx, branch)`` (e.g. a plain ``dict``).
+      The cache contract documented in
+      ``usam/conductor/plan_cache.py`` calls this the canonical layout.
+    * Any object exposing ``get(layer_idx, branch="image"|"action")``
+      (e.g. :class:`usam.conductor.plan_cache.PlanCache`).
+    """
+    assert branch in ("image", "action"), f"unknown branch {branch!r}"
+    key = (int(layer_idx), branch)
+    if isinstance(kv_cache, Mapping):
+        assert key in kv_cache, f"kv_cache missing {key!r}"
+        k, v = kv_cache[key]
+        return k, v
+    # PlanCache-like duck-type fallback.
+    return kv_cache.get(int(layer_idx), branch=branch)
+
+
+def _cached_cross_attention(
+    attn: "Attention",
+    hidden_states: Tensor,
+    cached_k: Tensor,
+    cached_v: Tensor,
+    attention_mask: Optional[Tensor] = None,
+) -> Tensor:
+    """Run cross-attention reusing pre-projected K, V from the PlanCache.
+
+    Mirrors :class:`diffusers.models.attention_processor.AttnProcessor2_0`
+    but skips the ``to_k`` / ``to_v`` projections — the cache already holds
+    their outputs, courtesy of :meth:`usam.conductor.plan_cache.PlanCache.refresh`.
+
+    Parameters
+    ----------
+    attn : diffusers.models.attention.Attention
+        The cross-attention module. We borrow ``to_q`` / ``to_out`` /
+        ``heads`` from it; ``to_k`` / ``to_v`` are deliberately unused.
+    hidden_states : Tensor
+        Query stream, ``[B, S_q, D]``.
+    cached_k, cached_v : Tensor
+        Pre-projected K, V from the cache. Shape
+        ``[B, S_plan, heads * head_dim]`` (i.e. after the linear and
+        before any head split). Dtype is whatever the cache stores
+        (typically bf16); we cast to the query dtype before SDPA.
+    attention_mask : Optional[Tensor]
+        Same convention as diffusers: additive mask broadcast to the
+        ``[B, heads, S_q, S_plan]`` score tensor.
+
+    Returns
+    -------
+    Tensor
+        ``[B, S_q, D]``. Bit-exact match to the on-the-fly path at fp32
+        when ``cached_k = attn.to_k(P_hat)`` and
+        ``cached_v = attn.to_v(P_hat)``.
+    """
+    assert hidden_states.dim() == 3, (
+        f"hidden_states must be [B,S,D], got {tuple(hidden_states.shape)}"
+    )
+    assert cached_k.dim() == 3 and cached_v.dim() == 3, (
+        f"cached_k/v must be [B,S_plan,D], got {tuple(cached_k.shape)} / "
+        f"{tuple(cached_v.shape)}"
+    )
+
+    b, s_q, _ = hidden_states.shape
+    heads = attn.heads
+    inner_dim = cached_k.shape[-1]
+    head_dim = inner_dim // heads
+
+    # Cast the cache to the query dtype so SDPA stays in one precision.
+    cached_k = cached_k.to(hidden_states.dtype)
+    cached_v = cached_v.to(hidden_states.dtype)
+
+    q = attn.to_q(hidden_states)
+
+    # [B, S, H*D_head] -> [B, H, S, D_head]
+    q = q.view(b, s_q, heads, head_dim).transpose(1, 2)
+    k = cached_k.view(b, cached_k.shape[1], heads, head_dim).transpose(1, 2)
+    v = cached_v.view(b, cached_v.shape[1], heads, head_dim).transpose(1, 2)
+
+    # Mirror AttnProcessor2_0: optional Q/K norm (only present when the
+    # parent ``Attention`` was built with ``qk_norm`` enabled). The
+    # current MMDiTBlock does not enable it, so this branch is dormant
+    # in production — but keeping it makes the cached path future-proof.
+    if getattr(attn, "norm_q", None) is not None:
+        q = attn.norm_q(q)
+    if getattr(attn, "norm_k", None) is not None:
+        k = attn.norm_k(k)
+
+    if attention_mask is not None:
+        # Diffusers normalizes the mask in `prepare_attention_mask`; we
+        # accept whatever the caller gives us and rely on broadcasting.
+        attention_mask = attention_mask.to(hidden_states.dtype)
+
+    out = F.scaled_dot_product_attention(
+        q, k, v, attn_mask=attention_mask, dropout_p=0.0, is_causal=False
+    )
+    # [B, H, S, D_head] -> [B, S, H*D_head]
+    out = out.transpose(1, 2).reshape(b, s_q, inner_dim)
+    out = out.to(q.dtype)
+
+    # Standard diffusers Attention output projection: to_out is a Sequential
+    # (Linear, Dropout). We follow the public pattern.
+    out = attn.to_out[0](out)
+    out = attn.to_out[1](out)
+    # Match diffusers' AttnProcessor2_0 trailing rescale (default 1.0).
+    rescale = getattr(attn, "rescale_output_factor", 1.0)
+    if rescale != 1.0:
+        out = out / rescale
+    return out
+
+
 class MMDiTBlock(Module):
     def __init__(
         self,
@@ -77,9 +194,15 @@ class MMDiTBlock(Module):
         qk_rmsnorm = False,
         flash_attn = False,
         num_residual_streams = 1,
+        layer_idx: int = 0,
         **kwargs
     ):
         super().__init__()
+        # USAM extension: each block records its own index so the
+        # PlanCache can be looked up via ``kv_cache[(layer_idx, branch)]``
+        # in :meth:`forward`. Default 0 keeps single-block tests / older
+        # call sites that don't pass an index a no-op.
+        self.layer_idx = int(layer_idx)
 
         # residual functions / maybe hyper connections
 
@@ -210,7 +333,21 @@ class MMDiTBlock(Module):
         action_tokens,
         text_mask = None,
         time_cond = None,
+        kv_cache: Optional[Mapping[Tuple[int, str], Tuple[Tensor, Tensor]]] = None,
     ):
+        """Run one MM-DiT block.
+
+        USAM extension: if ``kv_cache`` is provided, the cross-attention
+        K / V projections are skipped — we read pre-projected tensors out
+        of ``kv_cache[(self.layer_idx, "image")]`` for the image branch
+        and ``kv_cache[(self.layer_idx, "action")]`` for the action
+        branch. ``kv_cache`` may also be an object exposing
+        ``get(layer_idx, branch="image"|"action") -> (K, V)`` (e.g.
+        :class:`usam.conductor.plan_cache.PlanCache`).
+
+        When ``kv_cache is None`` the path is bit-exact identical to the
+        pre-USAM behaviour (training is unaffected).
+        """
 
         (
             image_pre_attn_gamma,
@@ -271,16 +408,37 @@ class MMDiTBlock(Module):
         image_tokens = self.image_cross_attn_layernorm(image_tokens)
         action_tokens = self.action_cross_attn_layernorm(action_tokens)
         # text_tokens = self.text_attn_layernorm(text_tokens)
-        image_tokens = self.img_cross_attn(
-            image_tokens,
-            encoder_hidden_states=text_tokens,
-            attention_mask=text_mask,
-        )
-        action_tokens = self.action_cross_attn(
-            action_tokens,
-            encoder_hidden_states=text_tokens,
-            attention_mask=text_mask,
-        )
+        # USAM: when a Plan-KV-Cache is present, skip the K/V projections
+        # and read pre-projected tensors out of the cache. The kv_cache=None
+        # branch is a bit-exact no-op vs. the pre-USAM forward.
+        if kv_cache is not None:
+            k_img, v_img = _kv_from_cache(kv_cache, self.layer_idx, "image")
+            image_tokens = _cached_cross_attention(
+                self.img_cross_attn,
+                image_tokens,
+                cached_k=k_img,
+                cached_v=v_img,
+                attention_mask=text_mask,
+            )
+            k_act, v_act = _kv_from_cache(kv_cache, self.layer_idx, "action")
+            action_tokens = _cached_cross_attention(
+                self.action_cross_attn,
+                action_tokens,
+                cached_k=k_act,
+                cached_v=v_act,
+                attention_mask=text_mask,
+            )
+        else:
+            image_tokens = self.img_cross_attn(
+                image_tokens,
+                encoder_hidden_states=text_tokens,
+                attention_mask=text_mask,
+            )
+            action_tokens = self.action_cross_attn(
+                action_tokens,
+                encoder_hidden_states=text_tokens,
+                attention_mask=text_mask,
+            )
 
         image_tokens = add_image_residual(image_tokens)
         action_tokens = add_action_residual(action_tokens)
@@ -353,7 +511,7 @@ class MMDiT(ModelMixin, ConfigMixin):
         self.text_attn_layernorm = nn.LayerNorm(cross_attention_dim, elementwise_affine = False)
         self.blocks = ModuleList([])
 
-        for _ in range(num_layers):
+        for layer_idx in range(num_layers):
             block = MMDiTBlock(
                 dim = self.inner_dim,
                 num_attention_heads = num_attention_heads,
@@ -369,6 +527,7 @@ class MMDiT(ModelMixin, ConfigMixin):
                 positional_embeddings=positional_embeddings,
                 num_positional_embeddings=self.config.max_num_positional_embeddings,
                 final_dropout=final_dropout,
+                layer_idx=layer_idx,
                 **kwargs
             )
 
@@ -422,6 +581,7 @@ class MMDiT(ModelMixin, ConfigMixin):
         time_cond = None,
         task_embedding = None,
         proprio: Optional[Tensor] = None,
+        kv_cache: Optional[Mapping[Tuple[int, str], Tuple[Tensor, Tensor]]] = None,
     ):
 
         if register_tokens is not None:
@@ -447,6 +607,7 @@ class MMDiT(ModelMixin, ConfigMixin):
                 image_tokens = image_tokens,
                 action_tokens = action_tokens,
                 text_mask = text_mask,
+                kv_cache = kv_cache,
             )
         if register_tokens is not None:
             _, image_tokens = unpack(image_tokens, packed_shape, 'b * d')

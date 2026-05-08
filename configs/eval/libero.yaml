@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: MIT
+# LIBERO closed-loop / open-loop ADE evaluation config.
+#
+# Wave-4 charter (inference-engineer):
+# * Open-loop ADE: 1000 holdout (episode, t) pairs drawn with
+#   numpy.random.default_rng(seed=42). Computes per-step L2 between
+#   predicted and ground-truth canonical-EE actions.
+# * Closed-loop LIBERO: 130 task suites × 50 episodes, episode_max_steps
+#   = 400. The success threshold matches the LIBERO paper's spec
+#   (terminal task success flag returned by the simulator).
+
+name: libero_eval
+
+# ---------------------------------------------------------------------------
+# LIBERO closed-loop benchmark grid
+# ---------------------------------------------------------------------------
+libero:
+  task_suites: 130
+  episodes_per_task: 50
+  episode_max_steps: 400
+  # The LIBERO paper defines success as the simulator's terminal `task
+  # done` flag; we forward that verbatim, no per-step distance threshold.
+  success_threshold: simulator_terminal_done
+  control_hz: 20
+
+# ---------------------------------------------------------------------------
+# Open-loop ADE
+# ---------------------------------------------------------------------------
+eval:
+  n_samples: 1000        # holdout (episode, t) pairs
+  seed: 42               # locked — must match `numpy.random.default_rng(seed=42)`
+  action_chunk: 16       # production canonical-EE chunk horizon
+
+# ---------------------------------------------------------------------------
+# Data — point at the prep-stage output via `--data` at runtime.
+# Defaults below match the smoke fixture so a CI round-trip works.
+# ---------------------------------------------------------------------------
+data:
+  root: tests/golden_data/tiny_droid
+  split: train
+  use_cached_features: true
+  cameras: [head_rgb]
+  modalities: [rgb, depth, flow]
+  history_frames: 4
+  future_frames: 8
+  action_chunk: 16
+  fps_features: 5
+  fps_action: 30
+
+# ---------------------------------------------------------------------------
+# Model construction (mirrors usam/_train_helpers.py:_USAMTrainConfig)
+# ---------------------------------------------------------------------------
+model:
+  hidden_size: 256
+  num_layers: 2
+  num_heads: 4
+  action_dim: 7
+  action_chunk: 8
+  rgb_dim: 768
+  depth_dim: 768
+  flow_dim: 768
+  proprio_dim: 50
+  n_keep_tokens: 65
+  n_plan_tokens: 32
+  e_proj_dim: 64
+  backbone_hidden: 64
+  backbone_seq_len: 64

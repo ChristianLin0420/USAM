@@ -59,7 +59,45 @@ __all__ = [
     "compute_ramped_weights",
     "build_run_id",
     "git_sha",
+    "load_checkpoint",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Public helpers for inference-time checkpoint loading
+# ---------------------------------------------------------------------------
+def load_checkpoint(path: "Path | str") -> Dict[str, Any]:
+    """Load a USAM training checkpoint into a plain dict.
+
+    Counterpart to :meth:`CheckpointManager._save`. The on-disk format is
+    described in :class:`CheckpointManager`'s docstring; we just call
+    ``torch.load(map_location="cpu")`` and surface the dict.
+
+    Parameters
+    ----------
+    path : Path | str
+        Absolute path to a ``.pt`` file produced by
+        :class:`CheckpointManager`.
+
+    Returns
+    -------
+    dict
+        Keys: ``state_dict``, ``optimizer``, ``scheduler``, ``step``,
+        ``run`` (a serialized :class:`RunMetadata`),
+        ``best_val_loss``, ``val_loss``, ``timestamp``.
+
+    Notes
+    -----
+    The inference path consumes ``state_dict`` and ``run["git_sha"]``;
+    the rest is for resume / debugging.
+    """
+    p = Path(path)
+    assert p.exists(), f"checkpoint does not exist: {p}"
+    payload = torch.load(str(p), map_location="cpu")
+    assert isinstance(payload, dict), (
+        f"expected dict checkpoint, got {type(payload).__name__}"
+    )
+    return payload
 
 
 # ---------------------------------------------------------------------------
