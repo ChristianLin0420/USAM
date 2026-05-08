@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: MIT
+# Stage B2 — embodiment fine-tune on a single LIBERO target.
+#
+# Differences vs B1:
+# * Lower learning rate, shorter run.
+# * Visual losses dampened (rgb=0.1, depth/flow=0.1) per plan §6.1.
+# * Auxiliary geom/flow_act ramp uses the *fully-ramped* target for the
+#   whole run (no schedule) — they're past 50K already.
+
+name: stage_b2_finetune
+
+parallelism:
+  data_parallel: 250
+  tensor_parallel: 2
+  pipeline_parallel: 1
+
+precision:
+  weights: bf16
+  activations_te_fp8: true
+  optimizer_states: bf16
+
+optimizer:
+  name: adamw
+  lr: 2.0e-5
+  betas: [0.9, 0.95]
+  weight_decay: 0.05
+  eps: 1.0e-8
+
+schedule:
+  type: cosine
+  warmup_steps: 500
+  total_steps: 50000
+  min_lr: 1.0e-6
+
+batch:
+  global_size: 512
+  micro_size: 4
+  grad_accum: 1
+
+data:
+  # Point at LIBERO at runtime via --data <org>/usam-libero-finetune
+  root: tests/golden_data/tiny_droid
+  cameras: [head_rgb]
+  modalities: [rgb, depth, flow]
+  history_frames: 4
+  future_frames: 8
+  action_chunk: 8
+  fps_features: 5
+  fps_action: 30
+  num_workers: 4
+
+# Plan §6.1: action λ=1, vis λ=0.1 each.
+loss_weights:
+  action: 1.0
+  rgb: 0.1
+  depth: 0.1
+  flow: 0.1
+  drift: 0.1
+  subtask: 0.1
+  # Already past the 50K ramp — start at the full target value.
+  geom_target: 0.05
+  flow_act_target: 0.05
+  ramp_steps: 1               # effectively no ramp
+
+cache_dropout_prob: 0.5
+plan_stale_window_frames: 60
+
+checkpoint:
+  every_steps: 2500
+  keep_last: 3
+
+max_steps: 50000
+
+seed: 0
+log_every: 50

@@ -1,0 +1,97 @@
+# SPDX-License-Identifier: MIT
+# Stage B1 — initial pretrain on the 6-source Tier-1 mixture.
+#
+# Wave-3 charter (training-engineer):
+# * Smoke runs use `usam_350m_smoke.yaml` and bs=4/GPU. If that OOMs on a
+#   given node, bump to grad_accum=2 and bs=2 — the loss curve will be
+#   identical at the cost of slower throughput.
+# * `geom` and `flow_act` weights ramp linearly 0 → target across the
+#   first 50_000 steps. Target values come from `loss_weights.*_target`.
+# * Cache-dropout fires *after every Conductor refresh* with p=0.5 over
+#   a 60-frame window (see usam/train.py docstring).
+
+name: stage_b1_pretrain
+
+# ---------------------------------------------------------------------------
+# Compute / parallelism (consumed by `usam.train.maybe_wrap_distributed`)
+# ---------------------------------------------------------------------------
+parallelism:
+  data_parallel: 250         # 500 H200 / 2 TP
+  tensor_parallel: 2
+  pipeline_parallel: 1
+
+precision:
+  weights: bf16              # H200 + A40/A100 alike
+  activations_te_fp8: true   # only honored on H200 (cap == (9, 0))
+  optimizer_states: bf16
+
+# ---------------------------------------------------------------------------
+# Optimizer + schedule (consumed by build_optimizer_and_scheduler)
+# ---------------------------------------------------------------------------
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  betas: [0.9, 0.95]
+  weight_decay: 0.05
+  eps: 1.0e-8
+
+schedule:
+  type: cosine
+  warmup_steps: 2000
+  total_steps: 700000
+  min_lr: 1.0e-5
+
+batch:
+  global_size: 1024          # 256 GPUs × 4 = 1024
+  micro_size: 4              # per-device batch
+  grad_accum: 1
+
+# ---------------------------------------------------------------------------
+# Data — point at one of the per-source repos at runtime via --data.
+# ---------------------------------------------------------------------------
+data:
+  root: tests/golden_data/tiny_droid
+  cameras: [head_rgb]
+  modalities: [rgb, depth, flow]
+  history_frames: 4
+  future_frames: 8
+  action_chunk: 8
+  fps_features: 5
+  # 30 Hz on production datasets (DROID, AgiBot, RH20T, etc.). The
+  # synthesized smoke fixture is 15 fps; the smoke test overrides this
+  # in `test_smoke_train.py` by reading the fixture's info.json.
+  fps_action: 30
+  num_workers: 4
+
+# ---------------------------------------------------------------------------
+# Loss weights and ramp schedule
+# ---------------------------------------------------------------------------
+loss_weights:
+  action: 1.0
+  rgb: 1.0
+  depth: 0.3
+  flow: 0.3
+  drift: 0.1
+  subtask: 0.1
+  # Ramped linearly 0 → target across `ramp_steps` (default 50_000).
+  geom_target: 0.05
+  flow_act_target: 0.05
+  ramp_steps: 50000
+
+cache_dropout_prob: 0.5
+plan_stale_window_frames: 60
+
+# ---------------------------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------------------------
+checkpoint:
+  every_steps: 5000
+  keep_last: 3
+
+max_steps: 700000
+
+# ---------------------------------------------------------------------------
+# Misc
+# ---------------------------------------------------------------------------
+seed: 0
+log_every: 50

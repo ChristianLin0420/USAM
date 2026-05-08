@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MIT
+# Phase A.5 — Tri-DINO adapter pretraining. Consumed by
+# `prep/adapter_pretrain.py` via `load_config()`.
+#
+# This step warms up the depth + flow patch_embed convs and the modality
+# LoRA paths so that depth/flow features land in roughly the same DINOv3
+# latent neighborhood as RGB — a prerequisite for the cross-modal
+# consistency losses to be useful in B1.
+#
+# Shape contract from `prep/adapter_pretrain.py`:
+#   AdapterPretrainConfig(
+#       encoder: TriDinoConfig,
+#       out_path: Path,
+#       batch_size, max_steps, lr, weight_decay,
+#       info_nce_temp, cls_mse_weight, info_nce_weight,
+#       log_every, save_every, seed, device,
+#   )
+
+# ---------------------------------------------------------------------------
+# Tri-DINO encoder config (produces a TriDinoConfig)
+# ---------------------------------------------------------------------------
+encoder:
+  dinov3_ckpt: /datasets/dinov3/dinov3-vitb14-pretrain-lvd1689m
+  dinov3_arch: vit_b_14
+  image_size: 378
+  patch_size: 14
+  embed_dim: 768
+  num_register_tokens: 4
+  lora_rank: 8
+  lora_target_names: ["query", "key", "value"]
+  freeze_rgb_patch_embed: false
+
+# ---------------------------------------------------------------------------
+# Trainer hyper-params
+# ---------------------------------------------------------------------------
+out_path: checkpoints/tri_dino_adapter.pt
+
+batch_size: 32
+max_steps: 50000
+lr: 5.0e-4
+weight_decay: 0.0
+
+# Cross-modal InfoNCE temperature and component weights (plan §11.23).
+info_nce_temp: 0.07
+info_nce_weight: 1.0
+cls_mse_weight: 1.0
+
+# Logging / checkpointing.
+log_every: 50
+save_every: 5000
+
+seed: 0
+device: cuda
