@@ -162,8 +162,15 @@ def encode_chunk(
 def _encode_modality(
     encoder, arr: np.ndarray, modality: str, cfg: DinoCacheConfig
 ) -> torch.Tensor:  # pragma: no cover
-    """Run the encoder on a [T, ...] array, returning ``[T, n_keep+1, D]`` fp16."""
+    """Run the encoder on a [T, ...] array, returning ``[T, n_keep+1, D]`` fp16.
+
+    Frames are bilinearly resized to ``cfg.target_hw`` before the encoder
+    call so the encoder always sees its expected input resolution
+    (default 448x448 for DINOv3-ViT-{B,L}/16). This decouples data
+    staging HW from encoder HW; staged data may be at e.g. 378x378.
+    """
     import torch
+    import torch.nn.functional as F
 
     out_chunks: List[torch.Tensor] = []
     T = arr.shape[0]
@@ -175,9 +182,14 @@ def _encode_modality(
         elif modality == "depth":
             t = torch.as_tensor(x).unsqueeze(1).contiguous().float() / 1000.0
         elif modality == "flow":
+            # Magnitude-scaling correction is deferred; the flow
+            # patch_embed is retrained via Phase A.5 adapter pretraining,
+            # so absolute flow magnitudes here are not load-bearing.
             t = torch.as_tensor(x).permute(0, 3, 1, 2).contiguous().float()
         else:
             raise ValueError(f"unknown modality {modality}")
+        if t.shape[-2:] != tuple(cfg.target_hw):
+            t = F.interpolate(t, size=cfg.target_hw, mode="bilinear", align_corners=False)
         with torch.no_grad():
             feats = encoder.extract_features(
                 t.cuda(), modality=modality, n_keep_tokens=cfg.n_keep_tokens

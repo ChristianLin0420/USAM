@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-# USAM main model — full 1.4B Player + DINOv3 ViT-L/14.
+# USAM main model — full 1.4B Player + DINOv3 ViT-L/16.
 # This config is consumed by `usam.train` (training-engineer's wave) and
 # is the source of truth for shape contracts. It mirrors the structure of
 # `lda/config/*` but lives outside `lda/` so we don't fork upstream.

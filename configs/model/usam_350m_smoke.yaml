@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # USAM smoke-test model — fits 8x A40 with bs=4 / GPU.
-# - DINOv3 ViT-B/14 (768-d) for all three modalities
+# - DINOv3 ViT-B/16 (768-d) for all three modalities
 # - 12-layer MM-DiT, ~350M params
 # - Action chunk 8, depth/flow heads disabled to keep params low
 

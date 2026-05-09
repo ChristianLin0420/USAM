@@ -53,15 +53,15 @@ class TriDinoConfig:
         the empty string ``""`` to indicate a random stand-in (mainly used
         in tests).
     dinov3_arch : str
-        Architecture tag, e.g. ``"vit_b_14"`` or ``"vit_l_14"``. Used only
+        Architecture tag, e.g. ``"vit_b_16"`` or ``"vit_l_16"``. Used only
         for logging when a real backbone is loaded; the actual config comes
         from the checkpoint itself.
     image_size : int
         Square input resolution. Patch grid is ``image_size // patch_size``.
     patch_size : int
-        Patch size of the underlying ViT (14 for DINOv3).
+        Patch size of the underlying ViT (16 for DINOv3).
     embed_dim : int
-        Hidden dimension of the ViT (768 for B/14, 1024 for L/14).
+        Hidden dimension of the ViT (768 for B/16, 1024 for L/16).
     num_register_tokens : int
         Number of register tokens DINOv3 prepends after [CLS].
     lora_rank : int
