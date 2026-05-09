@@ -75,12 +75,12 @@ class TriDinoConfig:
     """
 
     dinov3_ckpt: str = ""
-    dinov3_arch: str = "vit_b_14"
-    # 27 * 14 = 378; preserves the canonical 27x27=729 patch grid that the
-    # cache + plan reference. The plan colloquially says "384²"; YAMLs
-    # already override to 378. Default matches the binding contract.
-    image_size: int = 378
-    patch_size: int = 14
+    dinov3_arch: str = "vit_b_16"
+    # 28 * 16 = 448. ViT-B/16 + 448x448 → 28x28 = 784 patches. Token count
+    # is 1 (CLS) + num_register_tokens + 784. The cache slices the first
+    # n_keep_tokens patches downstream (see `extract_features`).
+    image_size: int = 448
+    patch_size: int = 16
     embed_dim: int = 768
     num_register_tokens: int = 4
     lora_rank: int = 8
@@ -207,8 +207,8 @@ class MiniDinoBackbone(nn.Module):
 
     def __init__(
         self,
-        image_size: int = 384,
-        patch_size: int = 14,
+        image_size: int = 448,
+        patch_size: int = 16,
         hidden_size: int = 768,
         num_register_tokens: int = 4,
         num_layers: int = 2,
@@ -301,6 +301,9 @@ class TriDINOTower(nn.Module):
         self.rgb_patch: nn.Conv2d = emb_module.patch_embeddings.projection
         embed_dim = self.rgb_patch.out_channels
         patch_size = self.rgb_patch.kernel_size[0]
+        assert config.image_size % patch_size == 0, (
+            f"image_size={config.image_size} must be divisible by patch_size={patch_size}"
+        )
 
         # Build depth/flow patch embeddings with surgical weight init.
         self.depth_patch = nn.Conv2d(1, embed_dim, kernel_size=patch_size, stride=patch_size)

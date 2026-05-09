@@ -19,12 +19,8 @@ from usam.encoders.tri_dino import (
 
 def _make_tower(
     embed_dim: int = 768,
-    # 27×14 = 378 — keeps the patch grid an exact integer for ViT-B/14.
-    # The plan calls this "384²" colloquially, but the math works out to
-    # a 27×27 = 729 patch grid, which requires image_size 378 with
-    # patch_size 14.
-    image_size: int = 378,
-    patch_size: int = 14,
+    image_size: int = 448,
+    patch_size: int = 16,
     num_register_tokens: int = 4,
     lora_rank: int = 8,
 ) -> TriDINOTower:
@@ -37,7 +33,7 @@ def _make_tower(
         num_heads=4,
     )
     cfg = TriDinoConfig(
-        dinov3_arch="vit_b_14",
+        dinov3_arch="vit_b_16",
         image_size=image_size,
         patch_size=patch_size,
         embed_dim=embed_dim,
@@ -50,13 +46,13 @@ def _make_tower(
 
 
 def test_forward_shape_all_modalities() -> None:
-    """ViT-B/14 at 384² → 729 patches + 1 [CLS] + 4 register = 734 tokens."""
+    """ViT-B/16 at 448² → 784 patches + 1 [CLS] + 4 register = 789 tokens."""
     tower = _make_tower()
     img_size = tower.image_size
     bs = 2
-    grid = img_size // tower.patch_size  # 27
+    grid = img_size // tower.patch_size  # 28
     expected_tokens = 1 + tower.num_register_tokens + grid * grid
-    assert expected_tokens == 1 + 4 + 729
+    assert expected_tokens == 1 + 4 + 784
 
     rgb = torch.randn(bs, 3, img_size, img_size)
     depth = torch.randn(bs, 1, img_size, img_size)
