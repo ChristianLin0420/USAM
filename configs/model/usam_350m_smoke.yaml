@@ -8,11 +8,11 @@ name: usam_350m_smoke
 
 encoder:
   type: tri_dino
-  dinov3_ckpt: /datasets/dinov3/dinov3-vitb14-pretrain-lvd1689m
-  dinov3_arch: vit_b_14
-  # 27 * 14 = 378. ViT-B/14 patch grid 27×27 → 729 patches → 65-token cache.
-  image_size: 378
-  patch_size: 14
+  dinov3_ckpt: facebook/dinov3-vitb16-pretrain-lvd1689m
+  dinov3_arch: vit_b_16
+  # 28 × 16 = 448. ViT-B/16 patch grid 28×28 → 784 patches → 65-token cache.
+  image_size: 448
+  patch_size: 16
   embed_dim: 768
   num_register_tokens: 4
   lora_rank: 8

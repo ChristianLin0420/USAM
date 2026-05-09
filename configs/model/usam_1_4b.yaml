@@ -11,14 +11,13 @@ name: usam_1_4b
 # ---------------------------------------------------------------------------
 encoder:
   type: tri_dino
-  # Path to a local DINOv3 checkpoint directory (HF format). The training
-  # entry point converts this to an absolute path before instantiation.
-  dinov3_ckpt: /datasets/dinov3/dinov3-vitl14-pretrain-lvd1689m
-  dinov3_arch: vit_l_14
-  # 27 * 14 = 378. The plan refers to this as "384²" colloquially but
-  # the patch grid math requires an exact multiple of the patch size.
-  image_size: 378
-  patch_size: 14
+  # HuggingFace model id; weights are baked into the prep / train Docker
+  # images so compute nodes never need an HF token at runtime.
+  dinov3_ckpt: facebook/dinov3-vitl16-pretrain-lvd1689m
+  dinov3_arch: vit_l_16
+  # 28 × 16 = 448. ViT-L/16 patch grid 28×28 → 784 patches → 65-token cache.
+  image_size: 448
+  patch_size: 16
   embed_dim: 1024
   num_register_tokens: 4
   lora_rank: 8

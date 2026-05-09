@@ -20,10 +20,10 @@
 # Tri-DINO encoder config (produces a TriDinoConfig)
 # ---------------------------------------------------------------------------
 encoder:
-  dinov3_ckpt: /datasets/dinov3/dinov3-vitb14-pretrain-lvd1689m
-  dinov3_arch: vit_b_14
-  image_size: 378
-  patch_size: 14
+  dinov3_ckpt: facebook/dinov3-vitb16-pretrain-lvd1689m
+  dinov3_arch: vit_b_16
+  image_size: 448
+  patch_size: 16
   embed_dim: 768
   num_register_tokens: 4
   lora_rank: 8
