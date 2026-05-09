@@ -33,12 +33,16 @@ class DinoCacheConfig:
     Attributes
     ----------
     target_hw : tuple[int, int]
-        Inference resolution. ViT-B/14 at 378x378 yields a 27x27=729 patch
-        grid (the plan colloquially calls this "384²" but 384 is not divisible
-        by 14; 378 keeps the canonical 729-token invariant).
+        Inference resolution. ViT-B/16 (or ViT-L/16) at 448x448 yields a
+        28x28 = 784 patch grid; the cache keeps the first ``n_keep_tokens``
+        patches plus [CLS].
     n_keep_tokens : int
-        Number of patch tokens kept per frame after pooling. Default 64
-        (downsampled by 3x3 average) plus the [CLS] -> 65 total.
+        Number of patch tokens kept per frame. Default 64; with [CLS] prepended
+        the on-disk shard's per-frame token dimension is 65.
+    embed_dim : int
+        Hidden dim of the encoder. 768 for ViT-B/16, 1024 for ViT-L/16. Used
+        only by the placeholder (encoder=None) path; the real path reads
+        the dim off the encoder.
     batch_size : int
     cache_fps : int
         Target output fps. We stride raw frames so the cache is at this fps.
@@ -46,14 +50,15 @@ class DinoCacheConfig:
         Always True at runtime; arg kept for parity with the other stages.
     """
 
-    target_hw: tuple[int, int] = (378, 378)
+    target_hw: tuple[int, int] = (448, 448)
     n_keep_tokens: int = 64
+    embed_dim: int = 768
     batch_size: int = 16
     cache_fps: int = 5
     fp16: bool = True
 
 
-def _load_tri_dino(ckpt_path: Path, dinov3_arch: str = "vit_b_14"):
+def _load_tri_dino(ckpt_path: Path, dinov3_arch: str = "vit_b_16"):
     """Lazy-load :class:`usam.encoders.tri_dino.TriDINOTower` and place on cuda.
 
     The model-architect's :class:`TriDINOTower` accepts a :class:`TriDinoConfig`
@@ -137,7 +142,8 @@ def encode_chunk(
                 idxs = _stride_to_cache_fps(arr.shape[0], source_fps, cfg.cache_fps)
                 if encoder is None:
                     feats = torch.zeros(
-                        (len(idxs), cfg.n_keep_tokens + 1, 768), dtype=torch.float16
+                        (len(idxs), cfg.n_keep_tokens + 1, cfg.embed_dim),
+                        dtype=torch.float16,
                     )
                 else:  # pragma: no cover - real-runtime path
                     feats = _encode_modality(encoder, arr[idxs], mod, cfg)
