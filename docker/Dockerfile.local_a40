@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================================================================
 # USAM Local Dev Docker Image (T0 — 8xA40)
 # Code dev, unit + integration tests, smoke train, inference smoke ≤10 Hz
@@ -81,6 +82,7 @@ ENV HF_HOME=/opt/dinov3-cache \
     HUGGINGFACE_HUB_CACHE=/opt/dinov3-cache/hub \
     TRANSFORMERS_CACHE=/opt/dinov3-cache/transformers
 RUN --mount=type=secret,id=hf_token,required=false \
+    set -e; \
     if [ -n "$HF_TOKEN" ]; then \
         export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"; \
     elif [ -f /run/secrets/hf_token ]; then \
@@ -96,8 +98,7 @@ RUN --mount=type=secret,id=hf_token,required=false \
         python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')"; \
     else \
         echo "T0 build: HF_TOKEN not provided; skipping DINOv3 bake (MiniDinoBackbone fallback at runtime)"; \
-    fi; \
-    unset HUGGING_FACE_HUB_TOKEN
+    fi
 
 # =============================================================================
 # Necessary Directories

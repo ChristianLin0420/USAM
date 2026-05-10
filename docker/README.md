@@ -46,7 +46,8 @@ without it and runtime falls back to `MiniDinoBackbone` for unit tests.
 T1 and T2 require it; the build fails fast otherwise.
 
 For the full operator runbook (build → smoke → ship → sbatch), see
-[`docs/HOWTO_PREP_DINOV3.md`](../docs/HOWTO_PREP_DINOV3.md).
+[`docs/HOWTO_PREP_DINOV3.md`](../docs/HOWTO_PREP_DINOV3.md) (added in Wave E
+after the A40 smoke gate passes).
 
 ## Singularity (T1 only)
 

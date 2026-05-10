@@ -1,0 +1,49 @@
+# Created by Wave C reviewer follow-up. Excluded from `docker build` context
+# so we don't ship git internals, caches, or large fixtures into the image.
+#
+# NOTE: tests/golden_data/ is intentionally NOT excluded here. The directory
+# contains Python synthesizer scripts (_synthesize_*.py) that are imported at
+# test time via `from tests.golden_data._synthesize_tiny_droid import ...`.
+# Excluding it would break `pytest tests/unit/` runs inside the image.
+# The pre-materialized tiny_droid/ fixture subdirectory is small enough that
+# the trade-off favors correctness over image size.
+
+# Git
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Worktrees / scratch
+.claude/
+.worktrees/
+
+# Project scratch
+playground/
+debug/
+ckpts/
+runs/
+logs/
+outputs/
+wandb/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Docker / Singularity build outputs (avoid recursive context)
+*.sif
+*.tar

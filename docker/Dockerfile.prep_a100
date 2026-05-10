@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # =============================================================================
 # USAM Prep Docker Image (T1 — 8xA100 Slurm)
 # Phase A pipeline: download → flow/depth → DINO caching → HF upload
