@@ -5,10 +5,17 @@
 # These deps are NOT needed at training (T2) or eval (T3) time.
 
 # --- optical flow (SEA-RAFT) ---
-sea-raft
+# Not on PyPI. Installed via git clone in docker/Dockerfile.prep_a100:
+#   clone of github.com/princeton-vl/SEA-RAFT to /opt/searaft
+#   A sea_raft/ shim package is created under /opt/searaft so that
+#   `from sea_raft.api import load_searaft` resolves correctly.
+# sea-raft
 
 # --- depth (Depth-Anything-V2) ---
-depth-anything-v2
+# Not on PyPI. Installed via git clone in docker/Dockerfile.prep_a100:
+#   clone of github.com/DepthAnything/Depth-Anything-V2 to /opt/dav2
+#   Missing __init__.py files are created so the package is importable.
+# depth-anything-v2
 
 # --- video decoding for prep workers ---
 decord

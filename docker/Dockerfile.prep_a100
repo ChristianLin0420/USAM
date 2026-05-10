@@ -58,6 +58,94 @@ RUN pip install --no-cache-dir -r /tmp/base.txt \
     && pip install --no-cache-dir -r /tmp/prep.txt
 
 # =============================================================================
+# Vision Models (cloned from GitHub — neither is on PyPI)
+# =============================================================================
+# SEA-RAFT (optical flow) and Depth-Anything-V2 (depth) are research repos
+# that ship no pip-installable manifest. We clone shallow copies and wire them
+# up so prep/stage_2b_compute_flow.py and prep/stage_2c_compute_depth.py can
+# import them.
+#
+# SEA-RAFT:
+#   The repo's Python code lives in core/ (raft.py, etc.) and expects
+#   `sys.path` to include the core/ directory. Our prep code calls
+#   `from sea_raft.api import load_searaft`, so we create a thin
+#   sea_raft/ shim package at /opt/searaft/sea_raft/ that wraps the
+#   underlying RAFT class (which uses PyTorchModelHubMixin for HF loading).
+#
+# Depth-Anything-V2:
+#   The repo ships a depth_anything_v2/ directory with relative imports
+#   (.dinov2, .util.blocks, etc.) but is missing the __init__.py files that
+#   make it importable as a Python package. We touch those files so that
+#   `from depth_anything_v2.dpt import DepthAnythingV2` works.
+
+RUN git clone --depth 1 https://github.com/princeton-vl/SEA-RAFT.git /opt/searaft \
+    && git clone --depth 1 https://github.com/DepthAnything/Depth-Anything-V2.git /opt/dav2
+
+# --- SEA-RAFT shim: create sea_raft/ package with api.py ---
+RUN mkdir -p /opt/searaft/sea_raft \
+    && touch /opt/searaft/sea_raft/__init__.py \
+    && cat > /opt/searaft/sea_raft/api.py << 'PYEOF'
+"""Thin shim so `from sea_raft.api import load_searaft` works.
+
+The upstream SEA-RAFT repo lives in /opt/searaft/core/; there is no
+sea_raft/ package in the original repo. This file bridges our prep code
+(which expects a load_searaft() factory) to the upstream RAFT class that
+uses PyTorchModelHubMixin for checkpoint loading.
+"""
+from __future__ import annotations
+import sys
+import os
+
+# Ensure core/ (raft.py, update.py, etc.) is on the path.
+_CORE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "core")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+
+from raft import RAFT  # noqa: E402 — must come after sys.path fix
+from config.parser import json_to_args  # noqa: E402
+import torch
+
+
+def load_searaft(ckpt_path: str) -> RAFT:
+    """Load a SEA-RAFT checkpoint from a local .pth file or HF Hub model ID.
+
+    Parameters
+    ----------
+    ckpt_path : str
+        Either a path to a local checkpoint file (*.pth / *.pt) or a
+        HuggingFace Hub model ID (e.g. ``"princeton-vl/SEA-RAFT-M"``).
+
+    Returns
+    -------
+    RAFT
+        The model in eval mode, on CPU (caller moves to GPU).
+    """
+    import os
+    if os.path.isfile(ckpt_path):
+        # Local checkpoint: need a matching config JSON alongside it.
+        cfg_path = os.path.splitext(ckpt_path)[0] + ".json"
+        if not os.path.isfile(cfg_path):
+            raise FileNotFoundError(
+                f"SEA-RAFT config JSON not found alongside checkpoint: {cfg_path}"
+            )
+        args = json_to_args(cfg_path)
+        model = RAFT(args)
+        sd = torch.load(ckpt_path, map_location="cpu")
+        model.load_state_dict(sd, strict=False)
+    else:
+        # Treat as HuggingFace Hub model ID — RAFT inherits from_pretrained.
+        model = RAFT.from_pretrained(ckpt_path)
+    return model.eval()
+
+
+__all__ = ["load_searaft"]
+PYEOF
+
+# --- Depth-Anything-V2: add missing __init__.py files ---
+RUN touch /opt/dav2/depth_anything_v2/__init__.py \
+    && touch /opt/dav2/depth_anything_v2/util/__init__.py
+
+# =============================================================================
 # Project Source
 # =============================================================================
 COPY . /workspace/USAM/
@@ -109,7 +197,10 @@ RUN mkdir -p \
 # =============================================================================
 # Set PYTHONPATH
 # =============================================================================
-ENV PYTHONPATH=/workspace/USAM
+# /opt/searaft      — provides sea_raft.api (shim) + core/ (raft.py etc.)
+# /opt/searaft/core — needed so internal SEA-RAFT imports resolve (raft, corr…)
+# /opt/dav2         — provides depth_anything_v2 package
+ENV PYTHONPATH=/opt/searaft:/opt/searaft/core:/opt/dav2:/workspace/USAM
 
 # =============================================================================
 # Verify Installation
@@ -124,7 +215,9 @@ RUN python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" && \
     python -c "import decord, cv2; print('✓ Video IO OK')" && \
     python -c "from usam.encoders.tri_dino import TriDINOTower, TriDinoConfig; print('✓ TriDINOTower OK')" && \
     python -c "from prep import stage_4_dino_cache; print('✓ prep.stage_4_dino_cache OK')" && \
-    python -c "from prep import stage_2b_compute_flow, stage_2c_compute_depth; print('✓ prep.stage_2b/2c OK')"
+    python -c "from prep import stage_2b_compute_flow, stage_2c_compute_depth; print('✓ prep.stage_2b/2c OK')" && \
+    python -c "from sea_raft.api import load_searaft; print('✓ SEA-RAFT shim importable')" && \
+    python -c "from depth_anything_v2.dpt import DepthAnythingV2; print('✓ Depth-Anything-V2 importable')"
 
 # =============================================================================
 # Expose Ports
