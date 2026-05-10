@@ -360,3 +360,73 @@ def encode_chunk_multigpu(
 
 
 __all__ = ["DinoCacheConfig", "encode_chunk", "encode_chunk_multigpu"]
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    """``python -m prep.stage_4_dino_cache --source droid --chunk 0 --num-gpus 8``.
+
+    NOTE: the Wave-B plan template proposed ``tyro``; the rest of ``prep/``
+    (stage_1_index, stage_5_validate, stage_6_upload, dispatch,
+    adapter_pretrain) uses ``argparse``. We match the existing convention to
+    keep the CLI surface consistent across stages and avoid a new
+    dependency in the prep image.
+    """
+    import argparse
+    import os as _os
+
+    parser = argparse.ArgumentParser(prog="prep.stage_4_dino_cache",
+                                     description=__doc__)
+    scratch_default = Path(_os.environ.get("USAM_SCRATCH", "/scratch/usam"))
+    parser.add_argument("--source", required=True,
+                        help="Source name (e.g. 'droid', 'bridge'). Used to build paths.")
+    parser.add_argument("--chunk", required=True, type=int,
+                        help="Chunk index.")
+    parser.add_argument("--staged-root", type=Path,
+                        default=scratch_default / "staged",
+                        help="Root containing <source>/chunk-NNN/ep_*/ directories.")
+    parser.add_argument("--output-root", type=Path,
+                        default=scratch_default / "dino_cache",
+                        help="Root where shards are written.")
+    parser.add_argument("--dinov3-ckpt", type=str,
+                        default="facebook/dinov3-vitl16-pretrain-lvd1689m",
+                        help="HF model id or local path for the DINOv3 checkpoint.")
+    parser.add_argument("--source-fps", type=int, default=30,
+                        help="Source video FPS; cache stride is computed from this.")
+    parser.add_argument("--num-gpus", type=int, default=0,
+                        help="0 = auto-detect torch.cuda.device_count().")
+    parser.add_argument("--target-h", type=int, default=448)
+    parser.add_argument("--target-w", type=int, default=448)
+    parser.add_argument("--n-keep-tokens", type=int, default=64)
+    parser.add_argument("--embed-dim", type=int, default=1024)
+    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--cache-fps", type=int, default=5)
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO)
+
+    chunk_dir = args.staged_root / args.source / f"chunk-{args.chunk:03d}"
+    cfg = DinoCacheConfig(
+        target_hw=(args.target_h, args.target_w),
+        n_keep_tokens=args.n_keep_tokens,
+        embed_dim=args.embed_dim,
+        batch_size=args.batch_size,
+        cache_fps=args.cache_fps,
+    )
+    encode_chunk_multigpu(
+        staged_chunk_dir=chunk_dir,
+        output_root=args.output_root / args.source,
+        dinov3_ckpt=Path(args.dinov3_ckpt),
+        source_fps=args.source_fps,
+        world_size=args.num_gpus,
+        config=cfg,
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    sys.exit(main())
