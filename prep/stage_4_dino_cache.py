@@ -93,6 +93,7 @@ def encode_chunk(
     dinov3_ckpt: Optional[Path] = None,
     source_fps: int = 30,
     config: DinoCacheConfig | None = None,
+    shard_id: int = 0,
 ) -> List[Path]:
     """Encode one chunk's worth of staged frames into per-modality safetensors.
 
@@ -105,6 +106,10 @@ def encode_chunk(
     The encoder argument is loaded lazily; if ``dinov3_ckpt`` is ``None`` we
     write zero-tensor placeholders of the correct shape. This is what the
     Phase 1 unit test exercises — the real encoder runs only on T1 hosts.
+
+    ``shard_id`` controls the output filename suffix: rank ``r`` writes
+    ``file-{r:03d}.safetensors`` so multi-rank workers don't clobber each
+    other when sharing one ``output_root``.
     """
     cfg = config or DinoCacheConfig()
     output_root.mkdir(parents=True, exist_ok=True)
@@ -153,7 +158,7 @@ def encode_chunk(
                 continue
             chunk_dir = output_root / cam / mod / f"chunk-{0:03d}"
             chunk_dir.mkdir(parents=True, exist_ok=True)
-            shard_path = chunk_dir / "file-000.safetensors"
+            shard_path = chunk_dir / f"file-{shard_id:03d}.safetensors"
             write_feature_shard(shard_path, shard_features)
             written.append(shard_path)
     return written
@@ -198,4 +203,160 @@ def _encode_modality(
     return torch.cat(out_chunks, dim=0)
 
 
-__all__ = ["DinoCacheConfig", "encode_chunk"]
+# ---------------------------------------------------------------------------
+# Multi-GPU sharding wrapper
+# ---------------------------------------------------------------------------
+def _shard_episodes_by_rank(
+    staged_chunk_dir: Path, world_size: int, rank: int
+) -> Path:
+    """Return a transient view of ``staged_chunk_dir`` whose ``ep_*`` symlinks
+    are filtered to the episodes owned by ``rank``.
+
+    We build a per-rank scratch directory under ``staged_chunk_dir.parent /
+    f"_shard_view_{rank}_of_{world_size}"`` and symlink only the episode dirs
+    where ``ep_idx % world_size == rank``. This lets us reuse the existing
+    single-process ``encode_chunk`` unmodified — it just sees fewer episodes.
+    """
+    import json as _json
+    import shutil
+
+    view_root = staged_chunk_dir.parent / f"_shard_view_{rank}_of_{world_size}"
+    view_root.mkdir(parents=True, exist_ok=True)
+    # Clear any stale entries from a previous run.
+    for old in view_root.glob("ep_*"):
+        if old.is_symlink():
+            old.unlink()
+        elif old.is_dir():
+            shutil.rmtree(old)
+    for ep_dir in sorted(staged_chunk_dir.glob("ep_*")):
+        meta_path = ep_dir / "meta.json"
+        if not meta_path.exists():
+            continue
+        ep_idx = int(_json.loads(meta_path.read_text())["episode_index"])
+        if ep_idx % world_size != rank:
+            continue
+        (view_root / ep_dir.name).symlink_to(ep_dir.resolve(), target_is_directory=True)
+    return view_root
+
+
+def _encode_chunk_worker(
+    rank: int,
+    world_size: int,
+    staged_chunk_dir: str,
+    output_root: str,
+    modalities: tuple[str, ...],
+    cameras: tuple[str, ...],
+    dinov3_ckpt: Optional[str],
+    source_fps: int,
+    config_kwargs: dict,
+) -> None:
+    """torch.multiprocessing.spawn entry point.
+
+    Pinned to one GPU; loads its own DINOv3; processes only the episodes
+    owned by ``rank``; writes ``file-{rank:03d}.safetensors`` per (cam, mod).
+    """
+    import logging as _logging
+    _logging.basicConfig(level=_logging.INFO,
+                         format=f"[rank {rank}] %(asctime)s %(message)s")
+    log = _logging.getLogger(__name__)
+
+    # Pin to our GPU. spawn launches us with all GPUs visible, so we have
+    # to set_device explicitly. CUDA_VISIBLE_DEVICES is not honored after
+    # the parent process has already initialized CUDA in some PyTorch builds.
+    import torch as _torch
+    if _torch.cuda.is_available():
+        _torch.cuda.set_device(rank)
+
+    view_dir = _shard_episodes_by_rank(
+        Path(staged_chunk_dir), world_size=world_size, rank=rank
+    )
+
+    # If our shard has no episodes, return immediately. encode_chunk would
+    # also be a no-op but logging here makes the rank diagnostics clearer.
+    if not list(view_dir.glob("ep_*")):
+        log.info("no episodes assigned; exiting")
+        return
+
+    cfg = DinoCacheConfig(**config_kwargs)
+    written = encode_chunk(
+        staged_chunk_dir=view_dir,
+        output_root=Path(output_root),
+        modalities=modalities,
+        cameras=cameras,
+        dinov3_ckpt=Path(dinov3_ckpt) if dinov3_ckpt else None,
+        source_fps=source_fps,
+        config=cfg,
+        shard_id=rank,
+    )
+    log.info("wrote %d shards", len(written))
+
+
+def encode_chunk_multigpu(
+    staged_chunk_dir: Path,
+    output_root: Path,
+    modalities: Iterable[str] = ("rgb", "depth", "flow"),
+    cameras: Iterable[str] = ("head_rgb", "wrist_rgb"),
+    dinov3_ckpt: Optional[Path] = None,
+    source_fps: int = 30,
+    world_size: int = 0,
+    config: DinoCacheConfig | None = None,
+) -> None:
+    """Run :func:`encode_chunk` sharded across ``world_size`` GPUs via
+    ``torch.multiprocessing.spawn``.
+
+    * ``world_size=0`` (default) auto-detects ``torch.cuda.device_count()``
+      and falls back to 1 if no CUDAs are visible.
+    * Each rank handles episodes ``ep_idx % world_size == rank``.
+    * Each rank writes ``file-{rank:03d}.safetensors`` per (cam, mod).
+
+    We do NOT return the list of shards because spawn's children write to
+    disk autonomously; callers should glob ``output_root/.../chunk-*/file-*.safetensors``.
+    """
+    import torch as _torch
+    if world_size <= 0:
+        world_size = _torch.cuda.device_count() if _torch.cuda.is_available() else 1
+    cfg = config or DinoCacheConfig()
+    config_kwargs = dict(
+        target_hw=cfg.target_hw,
+        n_keep_tokens=cfg.n_keep_tokens,
+        embed_dim=cfg.embed_dim,
+        batch_size=cfg.batch_size,
+        cache_fps=cfg.cache_fps,
+        fp16=cfg.fp16,
+    )
+
+    if world_size == 1:
+        # Single-process path: avoid mp.spawn so the placeholder smoke
+        # tests (no CUDA) and CI runners stay simple.
+        _encode_chunk_worker(
+            rank=0,
+            world_size=1,
+            staged_chunk_dir=str(staged_chunk_dir),
+            output_root=str(output_root),
+            modalities=tuple(modalities),
+            cameras=tuple(cameras),
+            dinov3_ckpt=str(dinov3_ckpt) if dinov3_ckpt else None,
+            source_fps=source_fps,
+            config_kwargs=config_kwargs,
+        )
+        return
+
+    import torch.multiprocessing as mp
+    mp.spawn(
+        _encode_chunk_worker,
+        args=(
+            world_size,
+            str(staged_chunk_dir),
+            str(output_root),
+            tuple(modalities),
+            tuple(cameras),
+            str(dinov3_ckpt) if dinov3_ckpt else None,
+            source_fps,
+            config_kwargs,
+        ),
+        nprocs=world_size,
+        join=True,
+    )
+
+
+__all__ = ["DinoCacheConfig", "encode_chunk", "encode_chunk_multigpu"]

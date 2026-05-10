@@ -75,6 +75,38 @@ def write_feature_shard(
     )
 
 
+def read_feature_shard(shard_path: Path) -> Dict[int, torch.Tensor]:
+    """Read a feature shard back into a ``{episode_index: tensor}`` dict.
+
+    Inverse of :func:`write_feature_shard`. Used by tests and small offline
+    inspection utilities; production hot-paths should go through
+    :class:`FeatureCache` (mmap, per-frame slicing).
+
+    Parameters
+    ----------
+    shard_path : Path
+        Path to the ``.safetensors`` file.
+
+    Returns
+    -------
+    dict[int, torch.Tensor]
+        Mapping ``episode_index -> tensor[T, N, D]``. Tensors retain their
+        on-disk dtype (typically fp16).
+    """
+    assert isinstance(shard_path, Path)
+    out: Dict[int, torch.Tensor] = {}
+    with safe_open(str(shard_path), framework="pt", device="cpu") as f:
+        for key in f.keys():
+            if not key.startswith("ep_"):
+                continue
+            try:
+                ep_idx = int(key.split("_")[-1])
+            except ValueError:
+                continue
+            out[ep_idx] = f.get_tensor(key)
+    return out
+
+
 class FeatureCache:
     """Memory-mapped reader for fp16 DINO feature shards.
 
