@@ -160,21 +160,21 @@ ENV HF_HOME=/opt/dinov3-cache \
     TRANSFORMERS_CACHE=/opt/dinov3-cache/transformers
 RUN --mount=type=secret,id=hf_token,required=false \
     if [ -n "$HF_TOKEN" ]; then \
-        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"; \
+        export HUGGING_FACE_HUB_TOKEN="$(printf '%s' "$HF_TOKEN" | tr -d '[:space:]')"; \
     elif [ -f /run/secrets/hf_token ]; then \
-        export HUGGING_FACE_HUB_TOKEN="$(cat /run/secrets/hf_token)"; \
+        export HUGGING_FACE_HUB_TOKEN="$(tr -d '[:space:]' < /run/secrets/hf_token)"; \
     else \
         echo "ERROR: T1 image requires HF_TOKEN. Pass it via:" >&2; \
         echo "  --build-arg HF_TOKEN=\$HF_TOKEN" >&2; \
         echo "  or DOCKER_BUILDKIT=1 ... --secret id=hf_token,env=HF_TOKEN" >&2; \
         exit 1; \
     fi \
+    && export HF_TOKEN="$HUGGING_FACE_HUB_TOKEN" \
     && mkdir -p "${HF_HOME}" \
     && huggingface-cli download "${DINOV3_MODEL}" \
         --local-dir "/opt/dinov3-cache/${DINOV3_MODEL}" \
-        --local-dir-use-symlinks False \
     && python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')" \
-    && unset HUGGING_FACE_HUB_TOKEN
+    && unset HUGGING_FACE_HUB_TOKEN HF_TOKEN
 
 # Lock runtime to offline mode — Slurm compute nodes must not call HF.
 ENV TRANSFORMERS_OFFLINE=1 \
