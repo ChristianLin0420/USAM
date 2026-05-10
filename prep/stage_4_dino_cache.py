@@ -91,6 +91,7 @@ def encode_chunk(
     modalities: Iterable[str] = ("rgb", "depth", "flow"),
     cameras: Iterable[str] = ("head_rgb", "wrist_rgb"),
     dinov3_ckpt: Optional[Path] = None,
+    dinov3_arch: str = "vit_b_16",
     source_fps: int = 30,
     config: DinoCacheConfig | None = None,
     shard_id: int = 0,
@@ -116,7 +117,11 @@ def encode_chunk(
     cams = list(cameras)
     mods = list(modalities)
 
-    encoder = _load_tri_dino(dinov3_ckpt) if dinov3_ckpt is not None else None
+    encoder = (
+        _load_tri_dino(dinov3_ckpt, dinov3_arch=dinov3_arch)
+        if dinov3_ckpt is not None
+        else None
+    )
     if encoder is None:
         _LOG.warning(
             "no DINOv3 checkpoint provided; stage_4 will write zero-tensor shards "
@@ -207,20 +212,23 @@ def _encode_modality(
 # Multi-GPU sharding wrapper
 # ---------------------------------------------------------------------------
 def _shard_episodes_by_rank(
-    staged_chunk_dir: Path, world_size: int, rank: int
+    staged_chunk_dir: Path,
+    scratch_root: Path,
+    world_size: int,
+    rank: int,
 ) -> Path:
-    """Return a transient view of ``staged_chunk_dir`` whose ``ep_*`` symlinks
-    are filtered to the episodes owned by ``rank``.
+    """Return a per-rank scratch directory of symlinks to the episodes owned
+    by ``rank``.
 
-    We build a per-rank scratch directory under ``staged_chunk_dir.parent /
-    f"_shard_view_{rank}_of_{world_size}"`` and symlink only the episode dirs
-    where ``ep_idx % world_size == rank``. This lets us reuse the existing
-    single-process ``encode_chunk`` unmodified — it just sees fewer episodes.
+    Built under ``scratch_root`` so we don't pollute the upstream staged
+    tree. The caller (``_encode_chunk_worker``) is responsible for removing
+    the directory at the end of the run; this function only cleans stale
+    entries on creation so a partial-failure rerun is safe.
     """
     import json as _json
     import shutil
 
-    view_root = staged_chunk_dir.parent / f"_shard_view_{rank}_of_{world_size}"
+    view_root = scratch_root / f"_shard_view_{rank}_of_{world_size}"
     view_root.mkdir(parents=True, exist_ok=True)
     # Clear any stale entries from a previous run.
     for old in view_root.glob("ep_*"):
@@ -247,6 +255,7 @@ def _encode_chunk_worker(
     modalities: tuple[str, ...],
     cameras: tuple[str, ...],
     dinov3_ckpt: Optional[str],
+    dinov3_arch: str,
     source_fps: int,
     config_kwargs: dict,
 ) -> None:
@@ -268,27 +277,39 @@ def _encode_chunk_worker(
         _torch.cuda.set_device(rank)
 
     view_dir = _shard_episodes_by_rank(
-        Path(staged_chunk_dir), world_size=world_size, rank=rank
+        Path(staged_chunk_dir),
+        scratch_root=Path(output_root),
+        world_size=world_size,
+        rank=rank,
     )
 
-    # If our shard has no episodes, return immediately. encode_chunk would
-    # also be a no-op but logging here makes the rank diagnostics clearer.
-    if not list(view_dir.glob("ep_*")):
-        log.info("no episodes assigned; exiting")
-        return
+    try:
+        # If our shard has no episodes, return immediately. encode_chunk would
+        # also be a no-op but logging here makes the rank diagnostics clearer.
+        if not list(view_dir.glob("ep_*")):
+            log.info("no episodes assigned; exiting")
+            return
 
-    cfg = DinoCacheConfig(**config_kwargs)
-    written = encode_chunk(
-        staged_chunk_dir=view_dir,
-        output_root=Path(output_root),
-        modalities=modalities,
-        cameras=cameras,
-        dinov3_ckpt=Path(dinov3_ckpt) if dinov3_ckpt else None,
-        source_fps=source_fps,
-        config=cfg,
-        shard_id=rank,
-    )
-    log.info("wrote %d shards", len(written))
+        cfg = DinoCacheConfig(**config_kwargs)
+        written = encode_chunk(
+            staged_chunk_dir=view_dir,
+            output_root=Path(output_root),
+            modalities=modalities,
+            cameras=cameras,
+            dinov3_ckpt=Path(dinov3_ckpt) if dinov3_ckpt else None,
+            dinov3_arch=dinov3_arch,
+            source_fps=source_fps,
+            config=cfg,
+            shard_id=rank,
+        )
+        log.info("wrote %d shards", len(written))
+    finally:
+        if view_dir.exists():
+            import shutil
+            # ignore_errors=True: if a downstream consumer is currently
+            # reading the view dir we don't want cleanup to crash the
+            # whole pipeline.
+            shutil.rmtree(view_dir, ignore_errors=True)
 
 
 def encode_chunk_multigpu(
@@ -297,6 +318,7 @@ def encode_chunk_multigpu(
     modalities: Iterable[str] = ("rgb", "depth", "flow"),
     cameras: Iterable[str] = ("head_rgb", "wrist_rgb"),
     dinov3_ckpt: Optional[Path] = None,
+    dinov3_arch: str = "vit_b_16",
     source_fps: int = 30,
     world_size: int = 0,
     config: DinoCacheConfig | None = None,
@@ -336,6 +358,7 @@ def encode_chunk_multigpu(
             modalities=tuple(modalities),
             cameras=tuple(cameras),
             dinov3_ckpt=str(dinov3_ckpt) if dinov3_ckpt else None,
+            dinov3_arch=dinov3_arch,
             source_fps=source_fps,
             config_kwargs=config_kwargs,
         )
@@ -351,6 +374,7 @@ def encode_chunk_multigpu(
             tuple(modalities),
             tuple(cameras),
             str(dinov3_ckpt) if dinov3_ckpt else None,
+            dinov3_arch,
             source_fps,
             config_kwargs,
         ),
@@ -393,6 +417,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dinov3-ckpt", type=str,
                         default="facebook/dinov3-vitl16-pretrain-lvd1689m",
                         help="HF model id or local path for the DINOv3 checkpoint.")
+    parser.add_argument(
+        "--dinov3-arch",
+        type=str,
+        default="vit_l_16",
+        choices=("vit_b_16", "vit_l_16"),
+        help="DINOv3 arch label. Must be consistent with --dinov3-ckpt's hidden_size.",
+    )
     parser.add_argument("--source-fps", type=int, default=30,
                         help="Source video FPS; cache stride is computed from this.")
     parser.add_argument("--num-gpus", type=int, default=0,
@@ -419,6 +450,7 @@ def main(argv: list[str] | None = None) -> int:
         staged_chunk_dir=chunk_dir,
         output_root=args.output_root / args.source,
         dinov3_ckpt=Path(args.dinov3_ckpt),
+        dinov3_arch=args.dinov3_arch,
         source_fps=args.source_fps,
         world_size=args.num_gpus,
         config=cfg,
