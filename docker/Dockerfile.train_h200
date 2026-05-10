@@ -1,50 +1,131 @@
-# SPDX-License-Identifier: MIT
-# USAM — Phase B training image (T2, 500xH200 burst).
+# =============================================================================
+# USAM Training Docker Image (T2 — 500xH200 burst)
+# Phase B pretrain + fine-tune. NGC base for Transformer-Engine + FP8.
+# =============================================================================
 #
-# Built on the NGC PyTorch container so transformer-engine (FP8 kernels) is
-# pre-installed and ABI-matched against the container's CUDA/cuDNN/NCCL.
-#
-# Build:
-#   docker build -f docker/Dockerfile.train_h200 -t usam:train-h200 .
+# Base UNCHANGED from nvcr.io/nvidia/pytorch:25.01-py3 — Transformer-Engine
+# is pre-built and ABI-matched against this container's CUDA/cuDNN/NCCL.
+# Switching to pytorch/pytorch loses TE; do not change without coordination.
 
 FROM nvcr.io/nvidia/pytorch:25.01-py3
 
+LABEL maintainer="USAM Team"
+LABEL description="USAM Phase B training image: TE/FP8 + baked DINOv3-ViT-L/16"
+
+# Build-time args (NOT persisted into final image env).
+ARG HF_TOKEN
+ARG DINOV3_MODEL=facebook/dinov3-vitl16-pretrain-lvd1689m
+
+# =============================================================================
+# Environment Variables
+# =============================================================================
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TOKENIZERS_PARALLELISM=false \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 
-# --- system deps (most are already in the NGC base image) ---
+ENV PYOPENGL_PLATFORM=egl \
+    MUJOCO_GL=egl
+
+WORKDIR /workspace
+
+# =============================================================================
+# System Dependencies (most ship in the NGC base)
+# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git git-lfs ffmpeg \
         libgl1-mesa-glx libglib2.0-0 \
+        libegl1-mesa libegl1-mesa-dev libglvnd0 \
+        libhdf5-dev \
     && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/USAM
+# =============================================================================
+# Python Build Tools
+# =============================================================================
+RUN pip install --upgrade pip setuptools wheel
 
-# --- python deps ---
-# The NGC image ships torch + transformer-engine. We do NOT reinstall torch
-# from requirements/base.txt's pin; pip will see a satisfied version. If pip
-# tries to upgrade torch and breaks the TE ABI, drop the torch line in
-# requirements/base.txt or use --no-deps for that single package.
-COPY pyproject.toml ./
-COPY requirements/base.txt requirements/base.txt
-COPY requirements/train.txt requirements/train.txt
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r requirements/base.txt \
-    && pip install -r requirements/train.txt
+# =============================================================================
+# Python Dependencies (USAM base + train tier)
+# =============================================================================
+# The NGC image ships torch + transformer-engine. requirements/base.txt
+# pins torch==2.6.0 — pip will see this satisfied or upgrade only if needed.
+# If pip tries to upgrade torch in a way that breaks TE ABI, drop the torch
+# pin from requirements/base.txt.
+COPY pyproject.toml /tmp/pyproject.toml
+COPY requirements/base.txt /tmp/base.txt
+COPY requirements/train.txt /tmp/train.txt
+RUN pip install --no-cache-dir -r /tmp/base.txt \
+    && pip install --no-cache-dir -r /tmp/train.txt
 
-# flash-attn must be built against the already-installed torch.
+# =============================================================================
+# Flash-Attention (required on T2)
+# =============================================================================
 RUN pip install --no-build-isolation flash-attn==2.6.3
 
-# --- project source ---
-COPY . .
+# =============================================================================
+# Project Source
+# =============================================================================
+COPY . /workspace/USAM/
+WORKDIR /workspace/USAM
 RUN pip install -e .
+
+# =============================================================================
+# Pre-download Gated Models (DINOv3-ViT-L/16) — REQUIRED on T2
+# =============================================================================
+ENV HF_HOME=/opt/dinov3-cache \
+    HUGGINGFACE_HUB_CACHE=/opt/dinov3-cache/hub \
+    TRANSFORMERS_CACHE=/opt/dinov3-cache/transformers
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ -n "$HF_TOKEN" ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"; \
+    elif [ -f /run/secrets/hf_token ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$(cat /run/secrets/hf_token)"; \
+    else \
+        echo "ERROR: T2 image requires HF_TOKEN. Pass it via --build-arg HF_TOKEN=\$HF_TOKEN" >&2; \
+        exit 1; \
+    fi \
+    && mkdir -p "${HF_HOME}" \
+    && huggingface-cli download "${DINOV3_MODEL}" \
+        --local-dir "/opt/dinov3-cache/${DINOV3_MODEL}" \
+        --local-dir-use-symlinks False \
+    && python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')" \
+    && unset HUGGING_FACE_HUB_TOKEN
+
+ENV TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_OFFLINE=1
 
 # NCCL tuning for H200 NVLink + IB fabric (overridable at runtime).
 ENV NCCL_IB_HCA=mlx5 \
-    NCCL_SOCKET_IFNAME=^lo,docker0 \
-    PYTHONPATH=/workspace/USAM
+    NCCL_SOCKET_IFNAME=^lo,docker0
 
-CMD ["bash"]
+# =============================================================================
+# Necessary Directories
+# =============================================================================
+RUN mkdir -p \
+    /workspace/USAM/data/staged \
+    /workspace/USAM/checkpoints \
+    /workspace/USAM/logs \
+    /workspace/USAM/outputs
+
+# =============================================================================
+# Set PYTHONPATH
+# =============================================================================
+ENV PYTHONPATH=/workspace/USAM
+
+# =============================================================================
+# Verify Installation
+# =============================================================================
+RUN python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" && \
+    python -c "import torch; print(f'✓ CUDA available: {torch.cuda.is_available()}')" && \
+    python -c "import transformer_engine.pytorch as te; print('✓ Transformer-Engine OK')" && \
+    python -c "import flash_attn; print(f'✓ flash-attn: {flash_attn.__version__}')" && \
+    python -c "import einops, hydra, wandb, h5py, cv2, safetensors; print('✓ Train deps OK')" && \
+    python -c "from usam.encoders.tri_dino import TriDINOTower, TriDinoConfig; print('✓ TriDINOTower OK')" && \
+    python -c "from usam.train import run; print('✓ usam.train OK')"
+
+EXPOSE 8080
+
+CMD ["/bin/bash"]
