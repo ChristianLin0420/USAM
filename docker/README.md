@@ -5,8 +5,8 @@ deps for that tier — never the union.
 
 | Tier | Image | Base | Use |
 |---|---|---|---|
-| **T0** local dev (8xA40) | `Dockerfile.local_a40` | `nvidia/cuda:12.4.1-devel-ubuntu22.04` | Code dev, unit + integration tests, smoke train. |
-| **T1** prep (8xA100 Slurm) | `Dockerfile.prep_a100` | `nvidia/cuda:12.4.1-devel-ubuntu22.04` | Phase A pipeline only: download, flow/depth, DINO caching, HF upload. |
+| **T0** local dev (8xA40) | `Dockerfile.local_a40` | `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel` | Code dev, unit + integration tests, smoke train. |
+| **T1** prep (8xA100 Slurm) | `Dockerfile.prep_a100` | `pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel` | Phase A pipeline only: download, flow/depth, DINO caching, HF upload. |
 | **T2** burst (500xH200) | `Dockerfile.train_h200` | `nvcr.io/nvidia/pytorch:25.01-py3` | Phase B pretrain + fine-tune. Transformer-Engine + FP8. |
 
 ## Which image do I want?
@@ -17,11 +17,36 @@ deps for that tier — never the union.
 
 ## Build
 
+All three images bake (or optionally bake, on T0) the gated DINOv3 weights
+at build time, so compute nodes never need an HF token at runtime. You
+must pass `HF_TOKEN` as a build arg (simple) or via BuildKit `--secret`
+(strict; never appears in image layers).
+
+```bash
+# Simple build-arg path
+export HF_TOKEN=hf_...   # token with access to facebook/dinov3-vitl16-pretrain-lvd1689m
+
+docker build --build-arg HF_TOKEN=$HF_TOKEN \
+             -f docker/Dockerfile.local_a40 -t usam:local-a40 .
+
+docker build --build-arg HF_TOKEN=$HF_TOKEN \
+             -f docker/Dockerfile.prep_a100 -t usam:prep-a100 .
+
+docker build --build-arg HF_TOKEN=$HF_TOKEN \
+             -f docker/Dockerfile.train_h200 -t usam:train-h200 .
+
+# Strict BuildKit secret path (token never embedded as an ARG)
+DOCKER_BUILDKIT=1 docker build \
+    --secret id=hf_token,env=HF_TOKEN \
+    -f docker/Dockerfile.prep_a100 -t usam:prep-a100 .
 ```
-docker build -f docker/Dockerfile.local_a40 -t usam:local-a40 .
-docker build -f docker/Dockerfile.prep_a100 -t usam:prep-a100 .
-docker build -f docker/Dockerfile.train_h200 -t usam:train-h200 .
-```
+
+T0 (`local_a40`) treats `HF_TOKEN` as **optional** — the build succeeds
+without it and runtime falls back to `MiniDinoBackbone` for unit tests.
+T1 and T2 require it; the build fails fast otherwise.
+
+For the full operator runbook (build → smoke → ship → sbatch), see
+[`docs/HOWTO_PREP_DINOV3.md`](../docs/HOWTO_PREP_DINOV3.md).
 
 ## Singularity (T1 only)
 
