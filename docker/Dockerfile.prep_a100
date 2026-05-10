@@ -1,52 +1,136 @@
-# SPDX-License-Identifier: MIT
-# USAM — Phase A prep image (T1, 8xA100 Slurm).
-#
-# Used for the data pipeline only:
-#   download -> stage_2a_to_lerobot -> flow / depth -> dino_cache -> upload.
-# NO flash-attn here; prep is not training.
-#
-# Build:
-#   docker build -f docker/Dockerfile.prep_a100 -t usam:prep-a100 .
-# Convert to Singularity for Slurm:
-#   singularity build usam_prep.sif docker-daemon://usam:prep-a100
+# =============================================================================
+# USAM Prep Docker Image (T1 — 8xA100 Slurm)
+# Phase A pipeline: download → flow/depth → DINO caching → HF upload
+# =============================================================================
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
+LABEL maintainer="USAM Team"
+LABEL description="USAM Phase A prep image: data pipeline + baked DINOv3-ViT-L/16"
+
+# Build-time args (NOT persisted into final image env).
+ARG HF_TOKEN
+ARG DINOV3_MODEL=facebook/dinov3-vitl16-pretrain-lvd1689m
+
+# =============================================================================
+# Environment Variables
+# =============================================================================
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TOKENIZERS_PARALLELISM=false \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 
-# --- system deps ---
-# `rsync` and `zstd` are used by prep/_hub.py for staging shards.
+# Headless rendering (for any LIBERO/sim usage from prep).
+ENV PYOPENGL_PLATFORM=egl \
+    MUJOCO_GL=egl
+
+WORKDIR /workspace
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3.10-dev python3-pip \
-        git git-lfs ffmpeg \
-        libgl1-mesa-glx libglib2.0-0 \
-        wget curl ca-certificates build-essential \
+        git git-lfs wget curl vim ca-certificates build-essential \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+        ffmpeg \
+        libegl1-mesa libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+        libglvnd0 libglvnd-dev \
+        libhdf5-dev \
         rsync zstd \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
     && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
+# =============================================================================
+# Python Build Tools
+# =============================================================================
+RUN pip install --upgrade pip setuptools wheel
+
+# =============================================================================
+# Python Dependencies (USAM base + prep tier)
+# =============================================================================
+COPY pyproject.toml /tmp/pyproject.toml
+COPY requirements/base.txt /tmp/base.txt
+COPY requirements/prep.txt /tmp/prep.txt
+RUN pip install --no-cache-dir -r /tmp/base.txt \
+    && pip install --no-cache-dir -r /tmp/prep.txt
+
+# =============================================================================
+# Project Source
+# =============================================================================
+COPY . /workspace/USAM/
 WORKDIR /workspace/USAM
-
-# --- python deps ---
-COPY pyproject.toml ./
-COPY requirements/base.txt requirements/base.txt
-COPY requirements/prep.txt requirements/prep.txt
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install -r requirements/base.txt \
-    && pip install -r requirements/prep.txt
-
-# --- project source ---
-COPY . .
 RUN pip install -e .
 
-# HF Hub fast-transfer paths used by prep/_hub.py + stage_6_upload.py.
-ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
-    HF_XET_HIGH_PERFORMANCE=1 \
-    PYTHONPATH=/workspace/USAM
+# =============================================================================
+# Pre-download Gated Models (DINOv3-ViT-L/16) — REQUIRED on T1
+# =============================================================================
+ENV HF_HOME=/opt/dinov3-cache \
+    HUGGINGFACE_HUB_CACHE=/opt/dinov3-cache/hub \
+    TRANSFORMERS_CACHE=/opt/dinov3-cache/transformers
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ -n "$HF_TOKEN" ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"; \
+    elif [ -f /run/secrets/hf_token ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$(cat /run/secrets/hf_token)"; \
+    else \
+        echo "ERROR: T1 image requires HF_TOKEN. Pass it via:" >&2; \
+        echo "  --build-arg HF_TOKEN=\$HF_TOKEN" >&2; \
+        echo "  or DOCKER_BUILDKIT=1 ... --secret id=hf_token,env=HF_TOKEN" >&2; \
+        exit 1; \
+    fi \
+    && mkdir -p "${HF_HOME}" \
+    && huggingface-cli download "${DINOV3_MODEL}" \
+        --local-dir "/opt/dinov3-cache/${DINOV3_MODEL}" \
+        --local-dir-use-symlinks False \
+    && python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')" \
+    && unset HUGGING_FACE_HUB_TOKEN
 
-CMD ["bash"]
+# Lock runtime to offline mode — Slurm compute nodes must not call HF.
+ENV TRANSFORMERS_OFFLINE=1 \
+    HF_HUB_OFFLINE=1
+
+# Hub fast-transfer paths (used by prep/_hub.py + stage_6_upload.py on the
+# login node, where OFFLINE=1 is overridden via env at runtime).
+ENV HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1
+
+# =============================================================================
+# Necessary Directories
+# =============================================================================
+RUN mkdir -p \
+    /workspace/USAM/data/staged \
+    /workspace/USAM/data/dino_cache \
+    /workspace/USAM/logs \
+    /workspace/USAM/outputs
+
+# =============================================================================
+# Set PYTHONPATH
+# =============================================================================
+ENV PYTHONPATH=/workspace/USAM
+
+# =============================================================================
+# Verify Installation
+# =============================================================================
+RUN python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" && \
+    python -c "import torch; print(f'✓ CUDA available: {torch.cuda.is_available()}')" && \
+    python -c "import numpy; print(f'✓ NumPy: {numpy.__version__}')" && \
+    python -c "import einops; print('✓ Einops OK')" && \
+    python -c "import safetensors; print('✓ Safetensors OK')" && \
+    python -c "from transformers import AutoModel; print('✓ Transformers OK')" && \
+    python -c "from huggingface_hub import HfApi; print('✓ HF Hub OK')" && \
+    python -c "import decord, cv2; print('✓ Video IO OK')" && \
+    python -c "from usam.encoders.tri_dino import TriDINOTower, TriDinoConfig; print('✓ TriDINOTower OK')" && \
+    python -c "from prep import stage_4_dino_cache; print('✓ prep.stage_4_dino_cache OK')" && \
+    python -c "from prep import stage_2b_compute_flow, stage_2c_compute_depth; print('✓ prep.stage_2b/2c OK')"
+
+# =============================================================================
+# Expose Ports
+# =============================================================================
+EXPOSE 8080
+
+# =============================================================================
+# Default Command
+# =============================================================================
+CMD ["/bin/bash"]
