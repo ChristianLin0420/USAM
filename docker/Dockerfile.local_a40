@@ -1,50 +1,130 @@
-# SPDX-License-Identifier: MIT
-# USAM — local 8xA40 dev image (T0).
-#
-# Smallest of the three USAM images. Used for:
-#   * unit + integration tests on a single 8xA40 node
-#   * `tests/integration/test_smoke_train.py` — 100-step train on the
-#     `tiny_*` golden fixtures
-#   * inference smoke loop at <=10 Hz (full 30 Hz needs H200)
-#
-# Build:
-#   docker build -f docker/Dockerfile.local_a40 -t usam:local-a40 .
+# =============================================================================
+# USAM Local Dev Docker Image (T0 — 8xA40)
+# Code dev, unit + integration tests, smoke train, inference smoke ≤10 Hz
+# =============================================================================
 
-FROM nvidia/cuda:12.4.1-devel-ubuntu22.04
+FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
+LABEL maintainer="USAM Team"
+LABEL description="USAM local 8xA40 image: tests + smoke train + inference smoke"
+
+# Build-time args (optional on T0 — bake is skipped if HF_TOKEN is empty).
+ARG HF_TOKEN
+ARG DINOV3_MODEL=facebook/dinov3-vitl16-pretrain-lvd1689m
+
+# =============================================================================
+# Environment Variables
+# =============================================================================
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TOKENIZERS_PARALLELISM=false \
+    NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 
-# --- system deps ---
+ENV PYOPENGL_PLATFORM=egl \
+    MUJOCO_GL=egl
+
+WORKDIR /workspace
+
+# =============================================================================
+# System Dependencies
+# =============================================================================
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3.10 python3.10-venv python3.10-dev python3-pip \
-        git git-lfs ffmpeg \
-        libgl1-mesa-glx libglib2.0-0 \
-        wget curl ca-certificates build-essential \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python \
-    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+        git git-lfs wget curl vim ca-certificates build-essential \
+        libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 \
+        ffmpeg \
+        libegl1-mesa libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev \
+        libglvnd0 libglvnd-dev \
+        libhdf5-dev \
     && git lfs install \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace/USAM
+# =============================================================================
+# Python Build Tools
+# =============================================================================
+RUN pip install --upgrade pip setuptools wheel
 
-# --- python deps (layer cached on requirements files) ---
-COPY pyproject.toml ./
-COPY requirements/base.txt requirements/base.txt
-COPY requirements/train.txt requirements/train.txt
-RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install -r requirements/base.txt \
-    && pip install -r requirements/train.txt
+# =============================================================================
+# Python Dependencies (USAM base + train tier)
+# =============================================================================
+COPY pyproject.toml /tmp/pyproject.toml
+COPY requirements/base.txt /tmp/base.txt
+COPY requirements/train.txt /tmp/train.txt
+RUN pip install --no-cache-dir -r /tmp/base.txt \
+    && pip install --no-cache-dir -r /tmp/train.txt
 
-# flash-attn must be built against an already-installed torch; cannot be
-# resolved via requirements.txt. Pin matches LDA-1B's tested version.
+# =============================================================================
+# Flash-Attention (required on T0 for perf parity with H200)
+# =============================================================================
 RUN pip install --no-build-isolation flash-attn==2.6.3
 
-# --- project source ---
-COPY . .
+# =============================================================================
+# Optional: xFormers (DINOv2 efficiency; safe to fail)
+# =============================================================================
+RUN pip install --no-cache-dir xformers || \
+    echo "Warning: xFormers install failed; runtime will fall back to non-xformers paths"
+
+# =============================================================================
+# Project Source
+# =============================================================================
+COPY . /workspace/USAM/
+WORKDIR /workspace/USAM
 RUN pip install -e .
 
+# =============================================================================
+# Pre-download Gated Models (OPTIONAL on T0)
+# =============================================================================
+# Bake DINOv3 weights only if HF_TOKEN is provided. Without it, the image
+# still builds; runtime falls back to MiniDinoBackbone for unit tests.
+ENV HF_HOME=/opt/dinov3-cache \
+    HUGGINGFACE_HUB_CACHE=/opt/dinov3-cache/hub \
+    TRANSFORMERS_CACHE=/opt/dinov3-cache/transformers
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ -n "$HF_TOKEN" ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$HF_TOKEN"; \
+    elif [ -f /run/secrets/hf_token ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$(cat /run/secrets/hf_token)"; \
+    else \
+        export HUGGING_FACE_HUB_TOKEN=""; \
+    fi; \
+    if [ -n "$HUGGING_FACE_HUB_TOKEN" ]; then \
+        mkdir -p "${HF_HOME}" && \
+        huggingface-cli download "${DINOV3_MODEL}" \
+            --local-dir "/opt/dinov3-cache/${DINOV3_MODEL}" \
+            --local-dir-use-symlinks False && \
+        python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')"; \
+    else \
+        echo "T0 build: HF_TOKEN not provided; skipping DINOv3 bake (MiniDinoBackbone fallback at runtime)"; \
+    fi; \
+    unset HUGGING_FACE_HUB_TOKEN
+
+# =============================================================================
+# Necessary Directories
+# =============================================================================
+RUN mkdir -p \
+    /workspace/USAM/data/staged \
+    /workspace/USAM/data/dino_cache \
+    /workspace/USAM/checkpoints \
+    /workspace/USAM/logs \
+    /workspace/USAM/outputs
+
+# =============================================================================
+# Set PYTHONPATH
+# =============================================================================
 ENV PYTHONPATH=/workspace/USAM
-CMD ["bash"]
+
+# =============================================================================
+# Verify Installation
+# =============================================================================
+RUN python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" && \
+    python -c "import torch; print(f'✓ CUDA available: {torch.cuda.is_available()}')" && \
+    python -c "import einops, hydra, wandb, h5py, cv2, safetensors; print('✓ Train deps OK')" && \
+    python -c "import flash_attn; print(f'✓ flash-attn: {flash_attn.__version__}')" && \
+    python -c "from usam.encoders.tri_dino import TriDINOTower, TriDinoConfig; print('✓ TriDINOTower OK')" && \
+    python -c "from usam.train import run; print('✓ usam.train OK')" && \
+    python -c "from usam.conductor import PlanCache; print('✓ usam.conductor OK')"
+
+EXPOSE 8080
+
+CMD ["/bin/bash"]
