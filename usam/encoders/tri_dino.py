@@ -84,7 +84,19 @@ class TriDinoConfig:
     embed_dim: int = 768
     num_register_tokens: int = 4
     lora_rank: int = 8
-    lora_target_names: tuple[str, ...] = ("query", "key", "value")
+    # Match BOTH naming conventions: DINOv2/MiniDinoBackbone use
+    # ``query/key/value``; DINOv3 attention modules use ``q_proj/k_proj/v_proj``.
+    # ``apply_lora`` does leaf-name matching, so unused names are silently
+    # ignored and only the projections present on the chosen backbone get
+    # wrapped.
+    lora_target_names: tuple[str, ...] = (
+        "query",
+        "key",
+        "value",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+    )
     freeze_rgb_patch_embed: bool = False
     # Optional override for tests / alternate backbones.
     backbone_override: nn.Module | None = field(default=None, repr=False)
@@ -291,14 +303,28 @@ class TriDINOTower(nn.Module):
         backbone = self._build_backbone(config)
         self.backbone = backbone
 
-        # Discover the original RGB patch_embed conv. We expect the standard
-        # HF DINOv3 path; the mini backbone uses the same path.
+        # Discover the original RGB patch_embed conv. Two layouts are
+        # supported:
+        # * Old HF DINOv2 / MiniDinoBackbone: ``patch_embeddings`` wraps a
+        #   Conv2d under ``.projection``.
+        # * New HF DINOv3 ViT (e.g. ``facebook/dinov3-vitl16-pretrain-lvd1689m``):
+        #   ``patch_embeddings`` IS the Conv2d directly.
         emb_module = self.backbone.embeddings
-        assert hasattr(emb_module, "patch_embeddings") and hasattr(
-            emb_module.patch_embeddings, "projection"
-        ), "Backbone is missing embeddings.patch_embeddings.projection (Conv2d)."
-
-        self.rgb_patch: nn.Conv2d = emb_module.patch_embeddings.projection
+        assert hasattr(emb_module, "patch_embeddings"), (
+            "Backbone is missing embeddings.patch_embeddings."
+        )
+        _pe = emb_module.patch_embeddings
+        if isinstance(_pe, nn.Conv2d):
+            # New DINOv3 ViT layout: patch_embeddings IS the Conv2d.
+            self.rgb_patch: nn.Conv2d = _pe
+        elif hasattr(_pe, "projection") and isinstance(_pe.projection, nn.Conv2d):
+            # Old HF ViT layout (DINOv2, MiniDinoBackbone): wrapped under .projection.
+            self.rgb_patch: nn.Conv2d = _pe.projection
+        else:
+            raise AssertionError(
+                f"Backbone's embeddings.patch_embeddings is {type(_pe).__name__}; "
+                "expected nn.Conv2d directly or a module with a .projection Conv2d."
+            )
         embed_dim = self.rgb_patch.out_channels
         patch_size = self.rgb_patch.kernel_size[0]
         assert config.image_size % patch_size == 0, (
@@ -438,26 +464,40 @@ class TriDINOTower(nn.Module):
             prefix.append(regs.expand(b, -1, -1))
         x = torch.cat(prefix + [patch_tokens], dim=1)
         # Add absolute position embeddings if present.
+        # DINOv3 uses RoPE applied inside attention; emb has no
+        # position_embeddings, so the getattr returns None and we skip the
+        # absolute pos-add for those backbones.
         pe = getattr(emb, "position_embeddings", None)
         if isinstance(pe, nn.Parameter):
             assert pe.shape[1] == x.shape[1], (
                 f"position_embeddings length {pe.shape[1]} != token count {x.shape[1]}"
             )
             x = x + pe
-        # Encoder.
-        encoder = self.backbone.encoder
-        out = encoder(x)
-        if isinstance(out, Tensor):
-            x = out
-        elif isinstance(out, dict):
-            x = out.get("last_hidden_state", out.get("hidden_states", out.get("hidden_state", None)))
-            assert x is not None, f"encoder dict did not contain hidden states: keys={list(out.keys())}"
-        elif isinstance(out, tuple):
-            x = out[0]
+        # Find the transformer-block ModuleList. DINOv3 ViT puts it at the
+        # top level (``self.backbone.layer``); MiniDinoBackbone (and HF
+        # DINOv2) wraps it in ``.encoder.layer``. Support both, plus the
+        # edge case where ``encoder`` is itself a ``ModuleList``.
+        encoder_mod = getattr(self.backbone, "encoder", None)
+        if encoder_mod is not None and hasattr(encoder_mod, "layer"):
+            layers = encoder_mod.layer       # DINOv2-style: backbone.encoder.layer
+        elif hasattr(self.backbone, "layer"):
+            layers = self.backbone.layer     # DINOv3-style: backbone.layer
+        elif encoder_mod is not None and isinstance(encoder_mod, nn.ModuleList):
+            layers = encoder_mod             # backbone.encoder is the ModuleList
         else:
-            # transformers ModelOutput etc.; fall back to attribute access.
-            x = getattr(out, "last_hidden_state", None) or getattr(out, "hidden_states", None)
-            assert isinstance(x, Tensor), f"unexpected encoder output type {type(out)}"
+            raise AssertionError(
+                "Could not locate transformer layers on backbone: "
+                f"has encoder={encoder_mod is not None}, "
+                f"has layer={hasattr(self.backbone, 'layer')}"
+            )
+        out = x
+        for layer in layers:
+            out = layer(out)
+            # Some HF blocks return a tuple (hidden_state, attn_weights);
+            # unwrap so the next block sees a plain Tensor.
+            if isinstance(out, tuple):
+                out = out[0]
+        x = out
         ln = getattr(self.backbone, "layernorm", None) or getattr(self.backbone, "norm", None)
         if isinstance(ln, nn.Module):
             x = ln(x)

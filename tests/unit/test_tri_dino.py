@@ -8,6 +8,7 @@ network access or large checkpoints.
 from __future__ import annotations
 
 import torch
+from torch import nn
 
 from usam.adapters.lora import LoRALinear
 from usam.encoders.tri_dino import (
@@ -163,3 +164,93 @@ def test_lora_routing_changes_output_when_b_nonzero() -> None:
     assert torch.allclose(baseline_rgb, new_rgb), "rgb output should be invariant"
     # flow path uses the flow LoRA paths -> changed
     assert not torch.allclose(baseline_flow, new_flow), "flow output should differ"
+
+
+def test_tridino_with_dinov3_layout_backbone() -> None:
+    """Verify TriDINOTower works with the real DINOv3 ViT layout
+    (patch_embeddings IS Conv2d, layer at top level, q_proj/k_proj/v_proj,
+    no absolute position_embeddings)."""
+    embed_dim = 64
+    image_size = 32
+    patch_size = 16
+    num_register_tokens = 2
+    grid = image_size // patch_size  # 2
+    num_patches = grid * grid  # 4
+    seq_len = 1 + num_register_tokens + num_patches  # 7
+
+    # Build a DINOv3-shaped mock: patch_embeddings is Conv2d directly,
+    # layer is a ModuleList of attention blocks with q_proj/k_proj/v_proj,
+    # no position_embeddings (RoPE-style).
+    class _DinoV3Embeddings(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            # Conv2d DIRECTLY under patch_embeddings, not nested .projection
+            self.patch_embeddings = nn.Conv2d(
+                3, embed_dim, kernel_size=patch_size, stride=patch_size
+            )
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            self.register_tokens = nn.Parameter(
+                torch.zeros(1, num_register_tokens, embed_dim)
+            )
+            # NO position_embeddings — RoPE style
+
+    class _DinoV3Attention(nn.Module):
+        """Attention with q_proj/k_proj/v_proj naming (DINOv3 convention)."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.q_proj = nn.Linear(embed_dim, embed_dim)
+            self.k_proj = nn.Linear(embed_dim, embed_dim)
+            self.v_proj = nn.Linear(embed_dim, embed_dim)
+            self.o_proj = nn.Linear(embed_dim, embed_dim)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.o_proj(self.q_proj(x) + self.k_proj(x) + self.v_proj(x))
+
+    class _DinoV3Block(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.norm1 = nn.LayerNorm(embed_dim)
+            self.attention = _DinoV3Attention()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return x + self.attention(self.norm1(x))
+
+    # `dataclass` field defaults can't capture closures, so bind to locals
+    # via a captured-default closure trick on the class itself.
+    _image_size = image_size
+    _patch_size = patch_size
+    _embed_dim = embed_dim
+    _num_register_tokens = num_register_tokens
+
+    class _Cfg:
+        def __init__(self) -> None:
+            self.image_size = _image_size
+            self.patch_size = _patch_size
+            self.hidden_size = _embed_dim
+            self.num_register_tokens = _num_register_tokens
+
+    class _DinoV3Backbone(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = _Cfg()
+            self.embeddings = _DinoV3Embeddings()
+            # `layer` AT TOP LEVEL (not under .encoder), matching DINOv3 ViT
+            self.layer = nn.ModuleList([_DinoV3Block() for _ in range(2)])
+            self.norm = nn.LayerNorm(embed_dim)
+            # No layernorm — DINOv3 uses `norm`
+
+    cfg = TriDinoConfig(
+        dinov3_arch="vit_b_16",
+        image_size=image_size,
+        patch_size=patch_size,
+        embed_dim=embed_dim,
+        num_register_tokens=num_register_tokens,
+        lora_rank=4,
+        lora_target_names=("q_proj", "k_proj", "v_proj"),
+        backbone_override=_DinoV3Backbone(),
+    )
+    tower = TriDINOTower(cfg)
+    rgb = torch.randn(2, 3, image_size, image_size)
+    out = tower(rgb, "rgb")
+    assert out.shape == (2, seq_len, embed_dim), out.shape

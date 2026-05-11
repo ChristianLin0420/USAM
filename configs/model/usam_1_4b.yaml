@@ -21,7 +21,7 @@ encoder:
   embed_dim: 1024
   num_register_tokens: 4
   lora_rank: 8
-  lora_target_names: ["query", "key", "value"]
+  lora_target_names: ["query", "key", "value", "q_proj", "k_proj", "v_proj"]
   freeze_rgb_patch_embed: false
   # Number of patch tokens kept by `extract_features` for the cache.
   cache_n_keep_tokens: 64
