@@ -157,19 +157,19 @@ def synthesize_tiny_droid(out_root: Path, seed: int = 0xD0DD) -> Path:
 
     # ---- features cache --------------------------------------------------
     # Layout: features/<camera>/<modality>/chunk-XXX/file-YYY.safetensors
-    # We write only the head-camera RGB cache for the smoke test; depth/flow
-    # are zero-tensor copies so the loader contracts hold.
+    # We write only the head-camera RGB cache for the smoke test; depth
+    # is a zero-tensor copy so the loader contracts hold.
     n_feat_frames = (N_FRAMES + (FPS_NATIVE // FPS_FEATURES) - 1) // (FPS_NATIVE // FPS_FEATURES)
     n_feat_frames = max(n_feat_frames, 4)  # need at least history_frames
     cam = "head_rgb"
-    for mod in ("rgb", "depth", "flow"):
+    for mod in ("rgb", "depth"):
         feats: Dict[int, torch.Tensor] = {}
         for ep_idx in range(N_EPISODES):
             t = torch.zeros((n_feat_frames, N_KEEP_TOKENS + 1, DINO_DIM), dtype=torch.float16)
             # tag the [CLS] token with episode id + modality so tests can
             # distinguish episodes / modalities without relying on randomness
             t[:, 0, 0] = float(ep_idx)
-            t[:, 0, 1] = {"rgb": 0, "depth": 1, "flow": 2}[mod]
+            t[:, 0, 1] = {"rgb": 0, "depth": 1}[mod]
             feats[ep_idx] = t
         shard = out_root / "features" / cam / mod / "chunk-000" / "file-000.safetensors"
         write_feature_shard(shard, feats)

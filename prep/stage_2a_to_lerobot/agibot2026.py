@@ -10,7 +10,7 @@ v2.1 layout with USAM-relevant extensions:
   subtask classifier (``L_subtask`` in §4.3); losing them silently would break
   the conductor's classification head, so we hard-assert they end up in the
   parquet.
-* depth shipped as 16-bit PNG that we re-encode as HEVC mp4 in stage_2b/2c.
+* depth shipped as 16-bit PNG that we re-encode as HEVC mp4 in stage_2c.
 * bimanual G1 embodiment with 24-D action; the stage_3 canonicalization rule
   ``joint_delta_to_ee_finite_diff`` expects the converter to pre-fill the
   first 7 padded columns of ``action_native`` with the right-arm EE velocity
@@ -215,7 +215,7 @@ class AgiBot2026Converter(CheckpointedJob):
 
         # Cameras: AgiBot 2026 stores each camera as a column of mp4 paths.
         # The actual frame extraction lives in the encoder stage; here we
-        # produce empty arrays and leave the camera names so stage_2b/2c know
+        # produce empty arrays and leave the camera names so stage_2c knows
         # which mp4s to read. If a downstream caller needs decoded frames they
         # come through ``raw_meta``.
         cameras: Dict[str, np.ndarray] = {}

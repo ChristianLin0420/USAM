@@ -19,7 +19,6 @@ REPO_ROOT_ENV = {"PYTHONUNBUFFERED": "1"}
 
 _STAGES = [
     "prep.stage_1_index",
-    "prep.stage_2b_compute_flow",
     "prep.stage_2c_compute_depth",
     "prep.stage_3_canonical",
     "prep.stage_4_dino_cache",
@@ -48,10 +47,6 @@ def test_stage_1_index_help_has_dataset() -> None:
     assert "--dataset" in _run_help("prep.stage_1_index")
 
 
-def test_stage_2b_compute_flow_help_has_dataset() -> None:
-    assert "--dataset" in _run_help("prep.stage_2b_compute_flow")
-
-
 def test_stage_2c_compute_depth_help_has_dataset() -> None:
     assert "--dataset" in _run_help("prep.stage_2c_compute_depth")
 
@@ -72,26 +67,11 @@ def test_stage_6_upload_help_has_dataset() -> None:
     assert "--dataset" in _run_help("prep.stage_6_upload")
 
 
-def test_source_is_deprecated_alias_for_stage_2b() -> None:
+def test_source_is_deprecated_alias_for_stage_2c() -> None:
     """``--source`` must still accept input and route to ``args.dataset``."""
-    help_text = _run_help("prep.stage_2b_compute_flow")
+    help_text = _run_help("prep.stage_2c_compute_depth")
     assert "--source" in help_text, "deprecated --source alias missing"
     assert "deprecated" in help_text.lower()
-
-
-def test_stage_2b_compute_flow_default_ckpt_is_sea_raft_m() -> None:
-    """The default for ``--searaft-ckpt`` must be the published SEA-RAFT M variant.
-
-    The L variant is referenced in the paper but never released publicly;
-    only S and M are on HF Hub under MemorySlices/. We default to the
-    Spring-finetuned M (best training mix among M-sized models).
-    """
-    help_text = _run_help("prep.stage_2b_compute_flow")
-    assert "MemorySlices/Tartan-C-T-TSKH-spring540x960-M" in help_text, (
-        "stage_2b's --searaft-ckpt should default to "
-        "MemorySlices/Tartan-C-T-TSKH-spring540x960-M\n"
-        f"got help:\n{help_text}"
-    )
 
 
 def test_stage_2c_compute_depth_default_ckpt_is_da3() -> None:

@@ -15,7 +15,7 @@ from usam.losses import LossWeights, USAMUnifiedLoss
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-EXPECTED_KEYS = ("action", "rgb", "depth", "flow", "geom", "flow_act", "drift", "subtask")
+EXPECTED_KEYS = ("action", "rgb", "depth", "geom", "drift", "subtask")
 
 
 def _zero_weights(**overrides: float) -> LossWeights:
@@ -32,9 +32,6 @@ def _make_loss(weights: LossWeights) -> USAMUnifiedLoss:
         return USAMUnifiedLoss(
             weights=weights,
             geom_kwargs=dict(dim=64, hidden=16),
-            flow_act_kwargs=dict(
-                proprio_dim=4, action_chunk_dim=6, hidden=16, flow_dim=64
-            ),
         )
 
 
@@ -48,15 +45,9 @@ def _make_predictions_targets() -> tuple[dict, dict]:
         "action": torch.randn(b, n_act, d_act),
         "image": torch.randn(b, 3, n_patch, d_lat),
         "depth": torch.randn(b, 3, n_patch, d_lat),
-        "flow": torch.randn(b, 3, n_patch, d_lat),
         "geom": {
             "depth_dino_pred": torch.randn(b, 3, n_patch, d_lat),
             "rgb_dino_pred": torch.randn(b, 3, n_patch, d_lat),
-        },
-        "flow_act": {
-            "proprio": torch.randn(b, 4),
-            "action_chunk": torch.randn(b, 6),
-            "flow_dino_pred": torch.randn(b, 3, n_patch, d_lat),
         },
         "drift": torch.randn(b, 16),
         "subtask": torch.randn(b),
@@ -65,7 +56,6 @@ def _make_predictions_targets() -> tuple[dict, dict]:
         "action": torch.randn(b, n_act, d_act),
         "image": torch.randn(b, 3, n_patch, d_lat),
         "depth": torch.randn(b, 3, n_patch, d_lat),
-        "flow": torch.randn(b, 3, n_patch, d_lat),
         "drift": torch.randn(b, 16),
         "subtask": torch.randint(0, 2, (b,)).float(),
     }
@@ -76,20 +66,18 @@ def _make_predictions_targets() -> tuple[dict, dict]:
 # LossWeights basics
 # ---------------------------------------------------------------------------
 def test_loss_weights_field_names() -> None:
-    """The dataclass declares exactly the eight named weights, in order."""
+    """The dataclass declares exactly the six named weights, in order."""
     names = tuple(f.name for f in fields(LossWeights))
     assert names == EXPECTED_KEYS
 
 
 def test_loss_weights_defaults_match_plan() -> None:
-    """Defaults must match plan §11.9 / §4.3."""
+    """Defaults must match plan §4.3."""
     w = LossWeights()
     assert w.action == 1.0
     assert w.rgb == 1.0
     assert w.depth == 0.3
-    assert w.flow == 0.3
     assert w.geom == 0.0
-    assert w.flow_act == 0.0
     assert w.drift == 0.1
     assert w.subtask == 0.1
 
@@ -134,47 +122,41 @@ def test_only_one_weight_active(only: str) -> None:
 # Aux-loss baseline reproduction
 # ---------------------------------------------------------------------------
 def test_baseline_reproduced_when_aux_zero() -> None:
-    """``LossWeights(geom=0, flow_act=0)`` reproduces a baseline that drops
-    the two new auxiliary terms.
+    """``LossWeights(geom=0)`` reproduces a baseline that drops the aux term.
 
     We verify this by building the explicit baseline (manually summing the
-    six non-aux components with their weights), then toggling ``geom`` and
-    ``flow_act`` to nonzero and confirming the total moves by exactly the
-    weighted sum of those two components.
+    five non-aux components with their weights), then toggling ``geom``
+    to nonzero and confirming the total moves by exactly the weighted
+    geom component.
     """
     preds, tgts = _make_predictions_targets()
 
-    # Baseline (no aux): default LossWeights already has geom = flow_act = 0.
-    baseline_weights = LossWeights()  # geom=0, flow_act=0 by default
+    # Baseline (no aux): default LossWeights already has geom = 0.
+    baseline_weights = LossWeights()  # geom=0 by default
     loss_fn_baseline = _make_loss(baseline_weights)
     total_baseline, per_loss_baseline = loss_fn_baseline(preds, tgts)
 
-    # Sum the six non-aux weighted contributions explicitly.
+    # Sum the five non-aux weighted contributions explicitly.
     weights = baseline_weights.as_dict()
-    six = sum(
+    five = sum(
         float(weights[k]) * per_loss_baseline[k]
         for k in EXPECTED_KEYS
-        if k not in ("geom", "flow_act")
+        if k != "geom"
     )
-    assert torch.allclose(total_baseline, six, atol=1e-6), (
-        "baseline total should be the sum of the six non-aux components"
+    assert torch.allclose(total_baseline, five, atol=1e-6), (
+        "baseline total should be the sum of the five non-aux components"
     )
 
-    # Now flip on the two aux weights and verify the diff.
-    aux_weights = LossWeights(geom=0.5, flow_act=0.7)
+    # Now flip on the aux weight and verify the diff.
+    aux_weights = LossWeights(geom=0.5)
     loss_fn_aux = _make_loss(aux_weights)
     total_aux, per_loss_aux = loss_fn_aux(preds, tgts)
 
-    # The non-aux per-loss components should be deterministic given the
-    # same (predictions, targets) — they don't depend on aux constructor
-    # randomness — so we can compute the diff against per_loss_aux.
-    diff_expected = (
-        0.5 * per_loss_aux["geom"] + 0.7 * per_loss_aux["flow_act"]
-    )
+    diff_expected = 0.5 * per_loss_aux["geom"]
     diff_observed = total_aux - sum(
         float(aux_weights.as_dict()[k]) * per_loss_aux[k]
         for k in EXPECTED_KEYS
-        if k not in ("geom", "flow_act")
+        if k != "geom"
     )
     assert torch.allclose(diff_observed, diff_expected, atol=1e-6)
 

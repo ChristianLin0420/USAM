@@ -1,16 +1,14 @@
 # SPDX-License-Identifier: MIT
-"""Tri-modal DINO Tower.
+"""Bi-modal DINO Tower.
 
-One DINOv3 backbone, three input adapters (RGB / depth / flow), three
+One DINOv3 backbone, two input adapters (RGB / depth), two
 modality-aware LoRA paths inside the attention blocks.
 
 * The **RGB patch_embed** is the original DINOv3 conv2d ``[D, 3, P, P]``.
 * The **depth patch_embed** is initialized from
   ``mean(rgb_patch.weight, dim=1, keepdim=True)`` and accepts a single
   channel.
-* The **flow patch_embed** is initialized from ``rgb_patch.weight[:, :2]``
-  and accepts two channels.
-* All three patch embeddings remain trainable.
+* Both patch embeddings remain trainable.
 * The backbone (everything except the patch embeddings and LoRA params) is
   frozen.
 
@@ -34,9 +32,9 @@ from torch import Tensor, nn
 from usam.adapters.lora import LoRALinear, apply_lora
 
 
-Modality = Literal["rgb", "depth", "flow"]
-_MODALITIES: tuple[str, ...] = ("rgb", "depth", "flow")
-_CHANNELS: dict[str, int] = {"rgb": 3, "depth": 1, "flow": 2}
+Modality = Literal["rgb", "depth"]
+_MODALITIES: tuple[str, ...] = ("rgb", "depth")
+_CHANNELS: dict[str, int] = {"rgb": 3, "depth": 1}
 
 
 # ---------------------------------------------------------------------------
@@ -331,9 +329,8 @@ class TriDINOTower(nn.Module):
             f"image_size={config.image_size} must be divisible by patch_size={patch_size}"
         )
 
-        # Build depth/flow patch embeddings with surgical weight init.
+        # Build depth patch embedding with surgical weight init.
         self.depth_patch = nn.Conv2d(1, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.flow_patch = nn.Conv2d(2, embed_dim, kernel_size=patch_size, stride=patch_size)
         with torch.no_grad():
             # depth: average over input channels -> [D, 1, P, P]
             self.depth_patch.weight.copy_(
@@ -341,10 +338,6 @@ class TriDINOTower(nn.Module):
             )
             if self.rgb_patch.bias is not None and self.depth_patch.bias is not None:
                 self.depth_patch.bias.copy_(self.rgb_patch.bias)
-            # flow: take first two input channels -> [D, 2, P, P]
-            self.flow_patch.weight.copy_(self.rgb_patch.weight[:, :2].clone())
-            if self.rgb_patch.bias is not None and self.flow_patch.bias is not None:
-                self.flow_patch.bias.copy_(self.rgb_patch.bias)
 
         # Freeze backbone first; then re-enable patch_embed + LoRA params.
         for p in self.backbone.parameters():
@@ -355,8 +348,6 @@ class TriDINOTower(nn.Module):
             for p in self.rgb_patch.parameters():
                 p.requires_grad_(True)
         for p in self.depth_patch.parameters():
-            p.requires_grad_(True)
-        for p in self.flow_patch.parameters():
             p.requires_grad_(True)
 
         # Apply LoRA to every Q/K/V linear in the backbone.
@@ -411,8 +402,6 @@ class TriDINOTower(nn.Module):
             feats = self.rgb_patch(x)
         elif modality == "depth":
             feats = self.depth_patch(x)
-        elif modality == "flow":
-            feats = self.flow_patch(x)
         else:
             raise ValueError(f"unknown modality {modality!r}")
         return feats.flatten(2).transpose(1, 2).contiguous()
@@ -534,9 +523,8 @@ class TriDINOTower(nn.Module):
         Parameters
         ----------
         x : Tensor
-            Pixel-style input. RGB ``[B, 3, H, W]``, depth ``[B, 1, H, W]``,
-            flow ``[B, 2, H, W]``.
-        modality : {"rgb", "depth", "flow"}
+            Pixel-style input. RGB ``[B, 3, H, W]``, depth ``[B, 1, H, W]``.
+        modality : {"rgb", "depth"}
             Which adapter + LoRA path to use.
 
         Returns

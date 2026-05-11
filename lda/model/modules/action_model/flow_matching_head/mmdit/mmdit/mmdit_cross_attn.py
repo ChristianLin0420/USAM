@@ -552,16 +552,11 @@ class MMDiT(ModelMixin, ConfigMixin):
             nn.Linear(proprio_dim, self.inner_dim) if self.enable_proprio_cond else None
         )
 
-        # Optional depth/flow flow-matching heads (Edit 2). Gated by
-        # `enable_depth_head` / `enable_flow_head`. The smoke config
-        # disables them.
+        # Optional depth flow-matching head (Edit 2). Gated by
+        # `enable_depth_head`. The smoke config disables it.
         self.enable_depth_head = bool(kwargs.get("enable_depth_head", False))
-        self.enable_flow_head = bool(kwargs.get("enable_flow_head", False))
         self.depth_proj_out = (
             nn.Linear(self.inner_dim, self.config.output_dim) if self.enable_depth_head else None
-        )
-        self.flow_proj_out = (
-            nn.Linear(self.inner_dim, self.config.output_dim) if self.enable_flow_head else None
         )
         # --------------------------------------------------------------------
 
@@ -622,16 +617,13 @@ class MMDiT(ModelMixin, ConfigMixin):
         action_pred = self.action_proj_out(action_tokens)
         image_pred = self.image_proj_out(image_tokens)
 
-        # USAM: optional depth / flow heads share the image-branch features.
-        if self.depth_proj_out is not None or self.flow_proj_out is not None:
+        # USAM: optional depth head shares the image-branch features.
+        if self.depth_proj_out is not None:
             outputs: dict[str, Tensor] = {
                 "image_tokens": image_pred,
                 "action_tokens": action_pred,
+                "depth_tokens": self.depth_proj_out(image_tokens),
             }
-            if self.depth_proj_out is not None:
-                outputs["depth_tokens"] = self.depth_proj_out(image_tokens)
-            if self.flow_proj_out is not None:
-                outputs["flow_tokens"] = self.flow_proj_out(image_tokens)
             return outputs
 
         return image_pred, action_pred

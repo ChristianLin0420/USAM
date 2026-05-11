@@ -150,14 +150,14 @@ def synthesize_tiny_robomind(out_root: Path, seed: int = 0x121E) -> Path:
         4,
     )
     for cam in CAMERAS:
-        for mod in ("rgb", "depth", "flow"):
+        for mod in ("rgb", "depth"):
             feats: Dict[int, torch.Tensor] = {}
             for ep_idx in range(N_EPISODES):
                 t = torch.zeros(
                     (n_feat_frames, N_KEEP_TOKENS + 1, DINO_DIM), dtype=torch.float16
                 )
                 t[:, 0, 0] = float(ep_idx)
-                t[:, 0, 1] = {"rgb": 0, "depth": 1, "flow": 2}[mod]
+                t[:, 0, 1] = {"rgb": 0, "depth": 1}[mod]
                 feats[ep_idx] = t
             shard = (
                 out_root

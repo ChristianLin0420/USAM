@@ -21,7 +21,6 @@ The DAG mirrors ``docs/IMPLEMENTATION_PLAN.md §5.3``::
 
     stage_2a_to_lerobot ──┐
                            ├──> stage_3_canonical ──> stage_4_dino_cache
-    stage_2b_compute_flow ─┤
     stage_2c_compute_depth ┘
                                             ──> stage_5_validate ──> stage_6_upload
 
@@ -66,7 +65,6 @@ _LOG = logging.getLogger(__name__)
 # stage only after every preceding stage in this list reports "done".
 DEFAULT_DAG: list[str] = [
     "stage_2a_to_lerobot",
-    "stage_2b_compute_flow",
     "stage_2c_compute_depth",
     "stage_3_canonical",
     "stage_4_dino_cache",

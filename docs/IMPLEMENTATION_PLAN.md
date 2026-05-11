@@ -222,7 +222,7 @@ The principle: **everything new goes under `usam/` or `prep/`. The `lda/` direct
 ### 4.2 Forward pass at training time
 
 Inputs (per training sample):
-- `rgb_dino_seq[t-T:t+1]`, `depth_dino_seq[t-T:t+1]`, `flow_dino_seq[t-T:t+1]` — pre-cached fp16 features at 5 Hz, T = 4
+- `rgb_dino_seq[t-T:t+1]`, `depth_dino_seq[t-T:t+1]` — pre-cached fp16 features at 5 Hz, T = 4
 - `proprio[t]` — embodiment-normalized 50-D vector
 - `action_chunk[t:t+16]` — 7-D canonical-EE action chunk (or padded native)
 - `instruction` — text string (used by Conductor on first call)
@@ -239,11 +239,9 @@ Forward pass:
    - `action_head` → predicted action chunk velocity
    - `rgb_dino_head` → predicted future RGB-DINO velocity
    - `depth_dino_head` → predicted future Depth-DINO velocity
-   - `flow_dino_head` → predicted future Flow-DINO velocity
 5. **Auxiliary heads**:
    - `f_drift_mlp(rgb_dino_cls[t], e_committed)` → predicted next `e` (for drift trigger)
    - `subtask_classifier(P̂, rgb_dino_cls[t])` → P(subtask completed)
-   - `g_phi(proprio[t], action_chunk)` → predicted mean flow magnitude
 6. **Losses**: see §4.3.
 
 ### 4.3 Loss equation (concrete)
@@ -252,24 +250,21 @@ Forward pass:
 L_action  = flow_match(action_pred, action_gt)
 L_rgb     = flow_match(rgb_dino_pred, rgb_dino_gt)
 L_depth   = flow_match(depth_dino_pred, depth_dino_gt)
-L_flow    = flow_match(flow_dino_pred, flow_dino_gt)
 
 # auxiliary
 L_geom     = soft_spearman_rank(decode_depth(depth_dino_pred), nearfield_cos(rgb_dino_pred))
-L_flow_act = mse(g_phi(proprio, action_chunk), flow_magnitude(flow_dino_pred))
 L_drift    = mse(f_drift(rgb_dino_cls, e_committed), e_target)
 L_subtask  = bce(subtask_classifier(P_hat, rgb_dino_cls), subtask_label)
 
 L_total = (1.0 * L_action +
            1.0 * L_rgb +
            0.3 * L_depth +
-           0.3 * L_flow +
-           ramp(0.05, step) * (L_geom + L_flow_act) +
+           ramp(0.05, step) * L_geom +
            0.1 * L_drift +
            0.1 * L_subtask)
 ```
 
-`ramp(0.05, step)` = linear ramp from 0 to 0.05 between steps 50K–100K. Aux losses start disabled to avoid early-training instability.
+`ramp(0.05, step)` = linear ramp from 0 to 0.05 between steps 50K–100K. Aux geom starts disabled to avoid early-training instability.
 
 ### 4.4 Forward pass at inference time
 

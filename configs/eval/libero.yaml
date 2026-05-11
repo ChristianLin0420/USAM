@@ -40,7 +40,7 @@ data:
   split: train
   use_cached_features: true
   cameras: [head_rgb]
-  modalities: [rgb, depth, flow]
+  modalities: [rgb, depth]
   history_frames: 4
   future_frames: 8
   action_chunk: 16
@@ -58,7 +58,6 @@ model:
   action_chunk: 8
   rgb_dim: 768
   depth_dim: 768
-  flow_dim: 768
   proprio_dim: 50
   n_keep_tokens: 65
   n_plan_tokens: 32

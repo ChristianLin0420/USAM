@@ -20,7 +20,7 @@ The actual Player MM-DiT consumes the cache via a ``kv_cache=`` kwarg
 in its ``forward``; see ``lda/model/modules/action_model/flow_matching_head/mmdit/mmdit/mmdit_cross_attn.py``.
 The :class:`RealtimeController` here is *agnostic* to that signature —
 it treats the player as a callable
-``player(rgb_dino, depth_dino, flow_dino, proprio, plan_cache,
+``player(rgb_dino, depth_dino, proprio, plan_cache,
 n_steps) -> action_chunk``. Concrete plumbing of the cache through
 each MM-DiT block is the model-architect's responsibility.
 
@@ -81,7 +81,7 @@ class StepResult:
 # Player protocol
 # ---------------------------------------------------------------------------
 PlayerCallable = Callable[..., Tensor]
-"""Signature: ``player(rgb_dino, depth_dino, flow_dino, proprio, plan_cache, n_steps) -> Tensor``."""
+"""Signature: ``player(rgb_dino, depth_dino, proprio, plan_cache, n_steps) -> Tensor``."""
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,6 @@ class RealtimeController:
         self,
         rgb: Tensor,
         depth: Tensor | None,
-        flow: Tensor | None,
         override: dict[str, Tensor] | None,
     ) -> dict[str, Tensor]:
         """Run Tri-DINO on each modality (or use overrides)."""
@@ -212,8 +211,6 @@ class RealtimeController:
         out["rgb"] = self.tri_dino(rgb, "rgb")
         if depth is not None:
             out["depth"] = self.tri_dino(depth, "depth")
-        if flow is not None:
-            out["flow"] = self.tri_dino(flow, "flow")
         return out
 
     def _refresh(self, observation: dict[str, Tensor], instruction: str | None) -> ConductorOutput:
@@ -263,7 +260,6 @@ class RealtimeController:
         self,
         rgb: Tensor,
         depth: Tensor | None = None,
-        flow: Tensor | None = None,
         *,
         proprio: Tensor,
         instruction: str | None = None,
@@ -276,13 +272,12 @@ class RealtimeController:
 
             rgb_dino   = dinov3.rgb(obs.rgb)
             depth_dino = dinov3.depth(obs.depth)
-            flow_dino  = dinov3.flow(obs.flow)
             e_now_est  = f_drift(rgb_dino_cls, e_committed)
             d_t        = 1 - cos(e_committed, e_now_est)
             if should_refresh(...):
                 e, P_hat = conductor(instruction, obs.rgb)
                 plan_cache.refresh(P_hat, e, k_projs, v_projs, t)
-            action = player.denoise(rgb_dino, depth_dino, flow_dino,
+            action = player.denoise(rgb_dino, depth_dino,
                                     proprio, plan_cache, n_steps=10)
             yield action
 
@@ -291,14 +286,14 @@ class RealtimeController:
         rgb : Tensor
             ``[B, 3, H, W]`` raw RGB. Used by both Tri-DINO and the
             Conductor.
-        depth, flow : Tensor or None
-            Optional auxiliary modalities for Tri-DINO.
+        depth : Tensor or None
+            Optional auxiliary modality for Tri-DINO.
         proprio : Tensor
             ``[B, proprio_dim]`` proprio.
         instruction : str or None
             Per-step instruction; falls back to :meth:`reset`'s value.
         override_features : dict, optional
-            Pre-encoded ``{"rgb": ..., "depth": ..., "flow": ...}``.
+            Pre-encoded ``{"rgb": ..., "depth": ...}``.
             Used by the smoke test and by training-time pipelines that
             already cache DINO features.
         force_drift_d : float or None
@@ -313,7 +308,7 @@ class RealtimeController:
         """
         instruction = instruction or self._instruction
 
-        feats = self._encode_visual(rgb, depth, flow, override_features)
+        feats = self._encode_visual(rgb, depth, override_features)
         rgb_tokens = feats["rgb"]
         # rgb_dino_cls = the [CLS] token (token 0).
         rgb_cls = rgb_tokens[:, 0, :]
@@ -366,7 +361,6 @@ class RealtimeController:
         action = self.player(
             rgb_dino=rgb_tokens,
             depth_dino=feats.get("depth"),
-            flow_dino=feats.get("flow"),
             proprio=proprio,
             plan_cache=self.plan_cache,
             n_steps=self.n_denoise_steps,

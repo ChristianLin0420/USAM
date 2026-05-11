@@ -50,7 +50,6 @@ player:
   enable_proprio_cond: true
   proprio_dim: 50
   enable_depth_head: true
-  enable_flow_head: true
 
 # ---------------------------------------------------------------------------
 # Action / state head
@@ -86,11 +85,6 @@ aux_heads:
     enabled: true
     dav2_distill_ckpt: /checkpoints/dav2_distill.pt
     nearfield_proto_ckpt: /checkpoints/nearfield_proto.pt
-  flow_action:
-    enabled: true
-    proprio_dim: 50
-    action_chunk_dim: 112  # 7 * 16
-    hidden: 256
   drift:
     enabled: true
     rgb_dino_dim: 1024

@@ -3,9 +3,9 @@
 #
 # Differences vs B1:
 # * Lower learning rate, shorter run.
-# * Visual losses dampened (rgb=0.1, depth/flow=0.1) per plan §6.1.
-# * Auxiliary geom/flow_act ramp uses the *fully-ramped* target for the
-#   whole run (no schedule) — they're past 50K already.
+# * Visual losses dampened (rgb=0.1, depth=0.1) per plan §6.1.
+# * Auxiliary geom ramp uses the *fully-ramped* target for the
+#   whole run (no schedule) — it's past 50K already.
 
 name: stage_b2_finetune
 
@@ -41,7 +41,7 @@ data:
   # Point at LIBERO at runtime via --data <org>/usam-libero-finetune
   root: tests/golden_data/tiny_droid
   cameras: [head_rgb]
-  modalities: [rgb, depth, flow]
+  modalities: [rgb, depth]
   history_frames: 4
   future_frames: 8
   action_chunk: 8
@@ -54,12 +54,10 @@ loss_weights:
   action: 1.0
   rgb: 0.1
   depth: 0.1
-  flow: 0.1
   drift: 0.1
   subtask: 0.1
   # Already past the 50K ramp — start at the full target value.
   geom_target: 0.05
-  flow_act_target: 0.05
   ramp_steps: 1               # effectively no ramp
 
 cache_dropout_prob: 0.5

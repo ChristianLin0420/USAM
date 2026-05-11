@@ -73,9 +73,9 @@ echo "[prep_run_local] stage 1: index"
 "$PYTHON" -m prep.stage_1_index \
   --dataset "$SOURCE" --raw "$RAW" --out "$OUT" --chunk "$CHUNK"
 
-# Stages 2a, 2b, 2c, 3, 4 are owned by data-engineer; entry points accept
+# Stages 2a, 2c, 3, 4 are owned by data-engineer; entry points accept
 # --dataset / --chunk / --resume (Wave F: one A100 node per dataset).
-for STAGE in stage_2a_to_lerobot stage_2b_compute_flow stage_2c_compute_depth \
+for STAGE in stage_2a_to_lerobot stage_2c_compute_depth \
              stage_3_canonical stage_4_dino_cache; do
   echo "[prep_run_local] $STAGE"
   set +e

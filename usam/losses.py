@@ -3,24 +3,24 @@
 
 This module provides:
 
-* :class:`LossWeights` — the eight scalar weights of the unified objective
-  (see plan §11.9 and §4.3).
-* :class:`USAMUnifiedLoss` — module that combines the four flow-matching
-  losses (``action``, ``rgb``, ``depth``, ``flow``) consumed from the MMDiT
-  prediction heads with the four auxiliary losses (``geom``, ``flow_act``,
-  ``drift``, ``subtask``).
+* :class:`LossWeights` — the six scalar weights of the unified objective
+  (see plan §4.3).
+* :class:`USAMUnifiedLoss` — module that combines the three flow-matching
+  losses (``action``, ``rgb``, ``depth``) consumed from the MMDiT
+  prediction heads with the three auxiliary losses (``geom``, ``drift``,
+  ``subtask``).
 
-The four flow-matching losses are treated as MSE between the MMDiT
+The three flow-matching losses are treated as MSE between the MMDiT
 velocity prediction and the corresponding target velocity. LDA-1B's own
 flow-matching primitive is structurally identical for the unweighted MSE
 case, so this aggregator wraps it directly without re-implementing the
-rectified-flow scheduling. The two USAM-specific auxiliary losses
-(``geom`` and ``flow_act``) come from :mod:`usam.aux_heads`.
+rectified-flow scheduling. The USAM-specific auxiliary loss ``geom``
+comes from :mod:`usam.aux_heads`.
 
 Predictions dictionary keys
 ---------------------------
 The aggregator reads MMDiT outputs by key. The MMDiT exposes
-``image_proj_out``, ``action_proj_out``, ``depth_proj_out``, ``flow_proj_out``.
+``image_proj_out``, ``action_proj_out``, ``depth_proj_out``.
 The :meth:`USAMUnifiedLoss.forward` method accepts the ``forward`` output
 dict whose entries are gated on the corresponding config flags:
 
@@ -29,20 +29,16 @@ dict whose entries are gated on the corresponding config flags:
   is named ``rgb`` to match the plan, the input is named ``image`` to
   match the MMDiT head).
 * ``predictions["depth"]`` — MMDiT depth velocity prediction.
-* ``predictions["flow"]`` — MMDiT flow velocity prediction.
 * ``predictions["geom"]`` — dict ``{"depth_dino_pred", "rgb_dino_pred"}``
   passed straight to :class:`GeomConsistencyLoss`.
-* ``predictions["flow_act"]`` — dict
-  ``{"proprio", "action_chunk", "flow_dino_pred"}`` passed straight to
-  :class:`FlowActionConsistencyLoss`.
 * ``predictions["drift"]`` — predicted next embedding from the f_drift MLP.
 * ``predictions["subtask"]`` — subtask completion logits ``[B, 1]`` or
   ``[B]``.
 
 Targets dictionary keys
 -----------------------
-* ``targets["action"]``, ``targets["image"]``, ``targets["depth"]``,
-  ``targets["flow"]`` — flow-matching targets.
+* ``targets["action"]``, ``targets["image"]``, ``targets["depth"]``
+  — flow-matching targets.
 * ``targets["drift"]`` — target embedding (from a fresh Conductor pass).
 * ``targets["subtask"]`` — float labels in ``{0, 1}``.
 
@@ -60,7 +56,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import torch
 from torch import Tensor, nn
 
-from usam.aux_heads import FlowActionConsistencyLoss, GeomConsistencyLoss
+from usam.aux_heads import GeomConsistencyLoss
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +71,7 @@ class LossWeights:
     * ``action = 1.0``
     * ``rgb = 1.0``
     * ``depth = 0.3``
-    * ``flow = 0.3``
     * ``geom = 0.0``       (ramped externally between 50K–100K steps)
-    * ``flow_act = 0.0``   (same)
     * ``drift = 0.1``
     * ``subtask = 0.1``
     """
@@ -85,9 +79,7 @@ class LossWeights:
     action: float = 1.0
     rgb: float = 1.0
     depth: float = 0.3
-    flow: float = 0.3
     geom: float = 0.0
-    flow_act: float = 0.0
     drift: float = 0.1
     subtask: float = 0.1
 
@@ -172,10 +164,9 @@ class USAMUnifiedLoss(nn.Module):
         Reserved for the GradNorm loss-balancer. Currently a no-op; the
         aggregator just exposes the flag for the training-engineer. Default
         ``False``.
-    geom_kwargs, flow_act_kwargs : dict | None
-        Optional constructor overrides for the two owned auxiliary heads.
-        See :class:`usam.aux_heads.GeomConsistencyLoss` and
-        :class:`usam.aux_heads.FlowActionConsistencyLoss`.
+    geom_kwargs : dict | None
+        Optional constructor overrides for the owned auxiliary head.
+        See :class:`usam.aux_heads.GeomConsistencyLoss`.
 
     Shapes (training contract)
     --------------------------
@@ -195,7 +186,6 @@ class USAMUnifiedLoss(nn.Module):
         weights: LossWeights,
         use_gradnorm: bool = False,
         geom_kwargs: Optional[Mapping[str, Any]] = None,
-        flow_act_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         super().__init__()
         assert isinstance(weights, LossWeights), "weights must be a LossWeights"
@@ -203,9 +193,6 @@ class USAMUnifiedLoss(nn.Module):
         self.use_gradnorm = bool(use_gradnorm)
 
         self.geom_loss = GeomConsistencyLoss(**(dict(geom_kwargs) if geom_kwargs else {}))
-        self.flow_act_loss = FlowActionConsistencyLoss(
-            **(dict(flow_act_kwargs) if flow_act_kwargs else {})
-        )
 
     # ------------------------------------------------------------------
     # Forward
@@ -235,7 +222,6 @@ class USAMUnifiedLoss(nn.Module):
             predictions, targets, masks, "rgb", alt_keys=("image",)
         )
         per_loss["depth"] = self._flow_match(predictions, targets, masks, "depth")
-        per_loss["flow"] = self._flow_match(predictions, targets, masks, "flow")
 
         # ---- Auxiliary: geometric consistency ----------------------------------
         # Skip the (expensive, shape-picky) compute when this component's
@@ -252,18 +238,6 @@ class USAMUnifiedLoss(nn.Module):
             )
         else:
             per_loss["geom"] = self._zero(predictions)
-
-        # ---- Auxiliary: flow-action consistency --------------------------------
-        if "flow_act" in predictions and self.weights.flow_act != 0.0:
-            fa_inputs = predictions["flow_act"]
-            assert isinstance(fa_inputs, Mapping), (
-                "predictions['flow_act'] must be a dict with proprio, action_chunk, flow_dino_pred"
-            )
-            per_loss["flow_act"] = self.flow_act_loss(
-                fa_inputs["proprio"], fa_inputs["action_chunk"], fa_inputs["flow_dino_pred"]
-            )
-        else:
-            per_loss["flow_act"] = self._zero(predictions)
 
         # ---- Auxiliary: f_drift regression -------------------------------------
         if "drift" in predictions and "drift" in targets:

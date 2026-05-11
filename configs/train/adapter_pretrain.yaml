@@ -2,8 +2,8 @@
 # Phase A.5 — Tri-DINO adapter pretraining. Consumed by
 # `prep/adapter_pretrain.py` via `load_config()`.
 #
-# This step warms up the depth + flow patch_embed convs and the modality
-# LoRA paths so that depth/flow features land in roughly the same DINOv3
+# This step warms up the depth patch_embed conv and the modality
+# LoRA paths so that depth features land in roughly the same DINOv3
 # latent neighborhood as RGB — a prerequisite for the cross-modal
 # consistency losses to be useful in B1.
 #

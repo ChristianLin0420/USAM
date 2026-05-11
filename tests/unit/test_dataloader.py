@@ -24,7 +24,7 @@ def test_dataset_loads_and_returns_expected_keys(tiny_droid_root: Path) -> None:
     ds = USAMLeRobotDataset(
         repo_id_or_path=tiny_droid_root,
         use_cached_features=True,
-        modalities=["rgb", "depth", "flow"],
+        modalities=["rgb", "depth"],
         cameras=["head_rgb"],
         history_frames=2,
         future_frames=1,

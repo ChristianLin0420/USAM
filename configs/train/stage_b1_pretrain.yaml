@@ -5,8 +5,8 @@
 # * Smoke runs use `usam_350m_smoke.yaml` and bs=4/GPU. If that OOMs on a
 #   given node, bump to grad_accum=2 and bs=2 — the loss curve will be
 #   identical at the cost of slower throughput.
-# * `geom` and `flow_act` weights ramp linearly 0 → target across the
-#   first 50_000 steps. Target values come from `loss_weights.*_target`.
+# * `geom` weight ramps linearly 0 → target across the
+#   first 50_000 steps. Target value comes from `loss_weights.geom_target`.
 # * Cache-dropout fires *after every Conductor refresh* with p=0.5 over
 #   a 60-frame window (see usam/train.py docstring).
 
@@ -52,7 +52,7 @@ batch:
 data:
   root: tests/golden_data/tiny_droid
   cameras: [head_rgb]
-  modalities: [rgb, depth, flow]
+  modalities: [rgb, depth]
   history_frames: 4
   future_frames: 8
   action_chunk: 8
@@ -70,12 +70,10 @@ loss_weights:
   action: 1.0
   rgb: 1.0
   depth: 0.3
-  flow: 0.3
   drift: 0.1
   subtask: 0.1
   # Ramped linearly 0 → target across `ramp_steps` (default 50_000).
   geom_target: 0.05
-  flow_act_target: 0.05
   ramp_steps: 50000
 
 cache_dropout_prob: 0.5

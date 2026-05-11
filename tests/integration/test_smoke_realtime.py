@@ -46,7 +46,6 @@ from usam.inference.realtime import RealtimeController
 def _mock_player(
     rgb_dino: Tensor,
     depth_dino: Tensor | None,
-    flow_dino: Tensor | None,
     proprio: Tensor,
     plan_cache,
     n_steps: int,
@@ -128,7 +127,6 @@ def test_realtime_runs_100_steps_without_error() -> None:
         result = controller.step(
             rgb=rgb,
             depth=None,
-            flow=None,
             proprio=proprio,
             instruction="pick up the cup",
             override_features={"rgb": rgb_tokens},
@@ -161,7 +159,6 @@ def test_realtime_refresh_count_matches_handtrace() -> None:
         result = controller.step(
             rgb=rgb,
             depth=None,
-            flow=None,
             proprio=proprio,
             instruction="open the drawer",
             override_features={"rgb": rgb_tokens},
@@ -185,7 +182,6 @@ def test_realtime_refresh_at_episode_start() -> None:
     result = controller.step(
         rgb=rgb,
         depth=None,
-        flow=None,
         proprio=proprio,
         override_features={"rgb": rgb_tokens},
         force_drift_d=0.0,

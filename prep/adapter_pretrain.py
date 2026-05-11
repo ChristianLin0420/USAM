@@ -3,30 +3,29 @@
 
 Goal
 ----
-Warm-start the new ``depth_patch`` and ``flow_patch`` Conv2d weights and the
-Q/K/V LoRA paths so that the depth and flow encoders produce features
-roughly aligned with the RGB-DINO latent space. This is run **once**
-before the Phase B pretraining; the resulting checkpoint is loaded by the
-training entry point and frozen further or fine-tuned at low LR.
+Warm-start the new ``depth_patch`` Conv2d weights and the Q/K/V LoRA
+paths so that the depth encoder produces features roughly aligned with
+the RGB-DINO latent space. This is run **once** before the Phase B
+pretraining; the resulting checkpoint is loaded by the training entry
+point and frozen further or fine-tuned at low LR.
 
 Pipeline summary
 ----------------
 1.  Load the Tri-DINO encoder from a config.
-2.  Stream RGB + depth + flow frames from a small subset (≈ 5 M frames) of
+2.  Stream RGB + depth frames from a small subset (≈ 5 M frames) of
     the converted USAM-LeRobot Tier-1 corpus.
-3.  Compute three losses, all with the **frozen RGB encoder as teacher**:
-      * **Patch-level InfoNCE** between RGB and the depth/flow tokens
+3.  Compute two losses, both with the **frozen RGB encoder as teacher**:
+      * **Patch-level InfoNCE** between RGB and the depth tokens
         (excluding [CLS] + register tokens).
-      * **CLS MSE** between projected depth-CLS / flow-CLS and the
-        RGB-CLS.
-4.  Backprop only into the depth/flow patch_embed + LoRA params (the
+      * **CLS MSE** between projected depth-CLS and the RGB-CLS.
+4.  Backprop only into the depth patch_embed + LoRA params (the
     backbone stays frozen by virtue of :class:`TriDINOTower`'s freeze
     policy).
 5.  Save ``checkpoints/tri_dino_adapter.pt`` with the trainable state dict.
 
 This module is intentionally self-contained: it does **not** import the
 data-engineer's dataloader (which doesn't exist yet). It instead consumes
-a generic ``Iterable`` of ``(rgb, depth, flow)`` tensor triples produced
+a generic ``Iterable`` of ``(rgb, depth)`` tensor pairs produced
 by a callable the caller passes in — at integration time the wrapper
 script wires up the real loader.
 
@@ -139,52 +138,41 @@ def train_step(
     encoder: TriDINOTower,
     rgb: Tensor,
     depth: Tensor,
-    flow: Tensor,
     cfg: AdapterPretrainConfig,
 ) -> dict[str, Tensor]:
     """Single step. Returns dict of named loss components (all scalars)."""
     rgb_out = encoder(rgb, "rgb")
     depth_out = encoder(depth, "depth")
-    flow_out = encoder(flow, "flow")
 
     n_reg = encoder.num_register_tokens
     rgb_cls = rgb_out[:, 0]
     depth_cls = depth_out[:, 0]
-    flow_cls = flow_out[:, 0]
     rgb_patches = rgb_out[:, 1 + n_reg :]
     depth_patches = depth_out[:, 1 + n_reg :]
-    flow_patches = flow_out[:, 1 + n_reg :]
 
     l_nce_d = patch_info_nce(depth_patches, rgb_patches, cfg.info_nce_temp)
-    l_nce_f = patch_info_nce(flow_patches, rgb_patches, cfg.info_nce_temp)
     l_mse_d = cls_mse(depth_cls, rgb_cls)
-    l_mse_f = cls_mse(flow_cls, rgb_cls)
 
-    total = (
-        cfg.info_nce_weight * (l_nce_d + l_nce_f)
-        + cfg.cls_mse_weight * (l_mse_d + l_mse_f)
-    )
+    total = cfg.info_nce_weight * l_nce_d + cfg.cls_mse_weight * l_mse_d
     return {
         "loss": total,
         "info_nce_depth": l_nce_d.detach(),
-        "info_nce_flow": l_nce_f.detach(),
         "cls_mse_depth": l_mse_d.detach(),
-        "cls_mse_flow": l_mse_f.detach(),
     }
 
 
 def run(
     cfg: AdapterPretrainConfig,
-    batch_iter: Iterable[tuple[Tensor, Tensor, Tensor]],
+    batch_iter: Iterable[tuple[Tensor, Tensor]],
 ) -> Path:
-    """Run adapter pretraining. ``batch_iter`` yields (rgb, depth, flow).
+    """Run adapter pretraining. ``batch_iter`` yields (rgb, depth).
 
     Parameters
     ----------
     cfg : AdapterPretrainConfig
         Hyper-parameters.
-    batch_iter : Iterable[tuple[Tensor, Tensor, Tensor]]
-        Each element is ``(rgb [B,3,H,W], depth [B,1,H,W], flow [B,2,H,W])``
+    batch_iter : Iterable[tuple[Tensor, Tensor]]
+        Each element is ``(rgb [B,3,H,W], depth [B,1,H,W])``
         already on the correct device.
 
     Returns
@@ -205,19 +193,18 @@ def run(
 
     cfg.out_path.parent.mkdir(parents=True, exist_ok=True)
     step = 0
-    iterator: Iterator[tuple[Tensor, Tensor, Tensor]] = iter(batch_iter)
+    iterator: Iterator[tuple[Tensor, Tensor]] = iter(batch_iter)
     while step < cfg.max_steps:
         try:
-            rgb, depth, flow = next(iterator)
+            rgb, depth = next(iterator)
         except StopIteration:
             iterator = iter(batch_iter)
             continue
 
         rgb = rgb.to(device, non_blocking=True)
         depth = depth.to(device, non_blocking=True)
-        flow = flow.to(device, non_blocking=True)
 
-        losses = train_step(encoder, rgb, depth, flow, cfg)
+        losses = train_step(encoder, rgb, depth, cfg)
         optimizer.zero_grad(set_to_none=True)
         losses["loss"].backward()
         optimizer.step()
@@ -257,12 +244,11 @@ def _dry_run(cfg: AdapterPretrainConfig) -> None:
     img = cfg.encoder.image_size
     bs = max(1, cfg.batch_size)
 
-    def _gen() -> Iterator[tuple[Tensor, Tensor, Tensor]]:
+    def _gen() -> Iterator[tuple[Tensor, Tensor]]:
         while True:
             yield (
                 torch.randn(bs, 3, img, img),
                 torch.randn(bs, 1, img, img),
-                torch.randn(bs, 2, img, img),
             )
 
     run(cfg, _gen())

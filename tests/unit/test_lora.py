@@ -13,11 +13,11 @@ def _zero_b_keeps_base_equal() -> None:
     base = nn.Linear(16, 24, bias=True)
     base_w = base.weight.detach().clone()
     base_b = base.bias.detach().clone()
-    wrapper = LoRALinear(base, r=8, modality_ids=["rgb", "depth", "flow"])
+    wrapper = LoRALinear(base, r=8, modality_ids=["rgb", "depth"])
 
     x = torch.randn(2, 5, 16)
     out_base = nn.functional.linear(x, base_w, base_b)
-    for mid in ("rgb", "depth", "flow"):
+    for mid in ("rgb", "depth"):
         out_w = wrapper(x, modality_id=mid)
         assert torch.allclose(out_base, out_w, atol=0, rtol=0), (
             f"LoRA at init must equal base for modality={mid}"

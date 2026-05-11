@@ -127,10 +127,7 @@ def main() -> int:
     # Match the dataloader's 8-frame action chunk (the loader uses
     # history_frames=4 + action_chunk=8 = 12 by default on the 5-fps
     # feature track; the 1.4B production config's action_horizon=16
-    # would need the loader to emit 16-frame chunks instead). The
-    # flow_act aux head is constructed with action_chunk_dim =
-    # action_dim * action_horizon, so 7 * 8 = 56 matches the loader's
-    # output and avoids the assertion mismatch at flow_action.py:201.
+    # would need the loader to emit 16-frame chunks instead).
     model_cfg.setdefault("action_head", {})["action_horizon"] = 8
 
     losses = train_run(args, train_cfg, model_cfg)

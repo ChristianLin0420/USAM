@@ -86,8 +86,6 @@ def compute_depth_for_chunk(
 ) -> List[Path]:
     """Run DA3 monocular depth on a chunk of staged RGB frames.
 
-    Parameters mirror :func:`prep.stage_2b_compute_flow.compute_flow_for_chunk`.
-
     Parameters
     ----------
     dav3_ckpt : str | None

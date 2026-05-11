@@ -35,11 +35,6 @@ convert:
   video_fps: 30
   preserve_force_torque: true
 
-flow:
-  target_hw: [378, 378]
-  iters: 12
-  fp16: true
-
 depth:
   path: dav2
   target_hw: [192, 192]

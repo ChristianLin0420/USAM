@@ -5,10 +5,10 @@ This module groups the **non-LDA** plumbing that ``usam.train`` needs but
 that doesn't belong in any of the locked Wave-1+2 modules:
 
 * :class:`SmokePlayer` — a tiny stand-in for the LDA-1B MM-DiT Player. It
-  consumes the same input dict the real Player consumes (rgb/depth/flow
-  DINO features, proprio, action chunk, plan-cache) and emits the four
-  velocity heads (``action``, ``image``, ``depth``, ``flow``) plus the
-  three auxiliary head inputs the unified loss expects. Used by the
+  consumes the same input dict the real Player consumes (rgb/depth
+  DINO features, proprio, action chunk, plan-cache) and emits the three
+  velocity heads (``action``, ``image``, ``depth``) plus the auxiliary
+  head inputs the unified loss expects. Used by the
   smoke-train integration test and the ``usam_350m_smoke`` config; the
   H200 burst replaces this with the real LDA-1B Player.
 * :class:`USAMTrainModel` — wraps Tri-DINO + Conductor + SmokePlayer +
@@ -20,7 +20,7 @@ that doesn't belong in any of the locked Wave-1+2 modules:
 * :func:`detect_precision` — H200 capability sniffing for
   Transformer-Engine FP8 vs BF16 fallback.
 * :func:`compute_ramped_weights` — the linear 0 → target ramp used for
-  ``geom`` / ``flow_act`` over the first 50_000 steps.
+  ``geom`` over the first 50_000 steps.
 
 The Player stub is **deliberately small** (~5 M params with the smoke
 config). It is *not* the production model — it is the minimum surface
@@ -223,59 +223,49 @@ def compute_ramped_weights(
     base: LossWeights,
     step: int,
     geom_target: float,
-    flow_act_target: float,
     ramp_steps: int = 50_000,
 ) -> LossWeights:
-    """Linearly ramp ``geom`` and ``flow_act`` weights from 0 → target.
+    """Linearly ramp ``geom`` weight from 0 → target.
 
-    Schedule (per the plan §4.3 + §6.2 charter):
+    Schedule (per the plan §4.3):
 
-    * ``step <= 0``                        → ``geom = flow_act = 0.0``
-    * ``0 < step < ramp_steps``           → ``w = target * step / ramp_steps``
-    * ``step >= ramp_steps``              → ``w = target`` (clamped)
+    * ``step <= 0``                        → ``geom = 0.0``
+    * ``0 < step < ramp_steps``           → ``geom = target * step / ramp_steps``
+    * ``step >= ramp_steps``              → ``geom = target`` (clamped)
 
-    The other six weights (``action``, ``rgb``, ``depth``, ``flow``,
-    ``drift``, ``subtask``) come from ``base`` unchanged.
+    The other five weights (``action``, ``rgb``, ``depth``, ``drift``,
+    ``subtask``) come from ``base`` unchanged.
 
     Parameters
     ----------
     base : LossWeights
-        The fixed weights from the YAML config. Its ``geom`` /
-        ``flow_act`` entries are *replaced*; everything else is copied.
+        The fixed weights from the YAML config. Its ``geom`` entry is
+        *replaced*; everything else is copied.
     step : int
-        Current global step counter (1-indexed in the loop, but ``step=0``
-        also produces the desired zero-weight start).
+        Current global step counter.
     geom_target : float
         Final ``geom`` weight after the ramp.
-    flow_act_target : float
-        Final ``flow_act`` weight after the ramp.
     ramp_steps : int, optional
-        Length of the ramp. Default ``50_000`` per the charter.
+        Length of the ramp. Default ``50_000``.
     """
     assert isinstance(base, LossWeights)
     assert isinstance(step, int)
     assert ramp_steps > 0, "ramp_steps must be positive"
     assert geom_target >= 0.0
-    assert flow_act_target >= 0.0
 
     if step <= 0:
         geom = 0.0
-        fa = 0.0
     elif step >= ramp_steps:
         geom = geom_target
-        fa = flow_act_target
     else:
         frac = float(step) / float(ramp_steps)
         geom = geom_target * frac
-        fa = flow_act_target * frac
 
     return LossWeights(
         action=base.action,
         rgb=base.rgb,
         depth=base.depth,
-        flow=base.flow,
         geom=geom,
-        flow_act=fa,
         drift=base.drift,
         subtask=base.subtask,
     )
@@ -289,14 +279,14 @@ class SmokePlayer(nn.Module):
 
     Architecture (parameter-thin on purpose):
 
-    * One linear stem per modality (rgb / depth / flow) reads
+    * One linear stem per modality (rgb / depth) reads
       ``[B, T, N, D]`` features and projects to ``hidden_size``.
     * A ``num_layers``-deep Transformer encoder (no cross-attention)
       reads the concatenated tokens; on every layer we also pull the
       cached plan ``K`` / ``V`` from :class:`PlanCache` and add them to
       the running residual stream (cheap cross-conditioning).
-    * Four projection heads emit the four velocity tensors with shapes
-      that match the four ground-truth tensors the dataloader produces.
+    * Three projection heads emit the three velocity tensors with shapes
+      that match the ground-truth tensors the dataloader produces.
 
     The plan ``K`` / ``V`` cache is read-only here — we never write back
     to it. The training loop is responsible for refreshing the cache via
@@ -313,7 +303,6 @@ class SmokePlayer(nn.Module):
         hidden_size: int = 256,
         rgb_dim: int = 768,
         depth_dim: int = 768,
-        flow_dim: int = 768,
         num_layers: int = 2,
         num_heads: int = 4,
         action_dim: int = 7,
@@ -336,13 +325,11 @@ class SmokePlayer(nn.Module):
         self.n_keep_tokens = n_keep_tokens
         self.rgb_dim = rgb_dim
         self.depth_dim = depth_dim
-        self.flow_dim = flow_dim
         self.num_layers = num_layers
 
         # Per-modality stems.
         self.rgb_stem = nn.Linear(rgb_dim, hidden_size)
         self.depth_stem = nn.Linear(depth_dim, hidden_size)
-        self.flow_stem = nn.Linear(flow_dim, hidden_size)
 
         # Proprio modulation token.
         self.proprio_proj = nn.Linear(proprio_dim, hidden_size)
@@ -365,7 +352,6 @@ class SmokePlayer(nn.Module):
         self.action_head = nn.Linear(hidden_size, action_dim)
         self.rgb_head = nn.Linear(hidden_size, rgb_dim)
         self.depth_head = nn.Linear(hidden_size, depth_dim)
-        self.flow_head = nn.Linear(hidden_size, flow_dim)
 
     # ------------------------------------------------------------------
     # Plan-cache K/V projections (consumed by ``Conductor.refresh``)
@@ -402,7 +388,6 @@ class SmokePlayer(nn.Module):
         self,
         rgb_dino_seq: Tensor,
         depth_dino_seq: Tensor,
-        flow_dino_seq: Tensor,
         proprio: Tensor,
         action_noisy: Tensor,
         plan_cache: PlanCache,
@@ -411,7 +396,7 @@ class SmokePlayer(nn.Module):
 
         Parameters
         ----------
-        rgb_dino_seq, depth_dino_seq, flow_dino_seq : Tensor
+        rgb_dino_seq, depth_dino_seq : Tensor
             ``[B, T_total, N, D_<mod>]`` cached DINO features. ``T_total``
             covers history + future; we just average across it for the
             stub.
@@ -428,11 +413,10 @@ class SmokePlayer(nn.Module):
         -------
         dict of Tensor
             ``predictions`` dict keyed by ``image``, ``action``, ``depth``,
-            ``flow``, ``geom`` (a sub-dict), ``flow_act`` (a sub-dict).
+            ``geom`` (a sub-dict).
         """
         assert rgb_dino_seq.dim() == 4, f"rgb_dino_seq must be [B,T,N,D], got {tuple(rgb_dino_seq.shape)}"
         assert depth_dino_seq.dim() == 4
-        assert flow_dino_seq.dim() == 4
         assert proprio.dim() == 2
         assert action_noisy.dim() == 3
 
@@ -440,17 +424,15 @@ class SmokePlayer(nn.Module):
         # Average across the time + token dims for the stem (cheap pooling).
         rgb_pool = rgb_dino_seq.mean(dim=(1, 2))  # [B, D_rgb]
         depth_pool = depth_dino_seq.mean(dim=(1, 2))
-        flow_pool = flow_dino_seq.mean(dim=(1, 2))
 
         # Stems → [B, hidden]
         rgb_tok = self.rgb_stem(rgb_pool).unsqueeze(1)  # [B, 1, H]
         depth_tok = self.depth_stem(depth_pool).unsqueeze(1)
-        flow_tok = self.flow_stem(flow_pool).unsqueeze(1)
         proprio_tok = self.proprio_proj(proprio).unsqueeze(1)
         action_tok = self.action_in(action_noisy)  # [B, chunk, H]
 
-        x = torch.cat([rgb_tok, depth_tok, flow_tok, proprio_tok, action_tok], dim=1)
-        # [B, S, H] with S = 4 + chunk
+        x = torch.cat([rgb_tok, depth_tok, proprio_tok, action_tok], dim=1)
+        # [B, S, H] with S = 3 + chunk
 
         # Add layer-0 plan K/V mean as cheap cross-conditioning.
         if plan_cache.is_valid():
@@ -464,29 +446,21 @@ class SmokePlayer(nn.Module):
         # Slice tokens back out for the heads.
         rgb_h = x[:, 0]  # [B, H]
         depth_h = x[:, 1]
-        flow_h = x[:, 2]
-        action_h = x[:, 4 : 4 + self.action_chunk]  # [B, chunk, H]
+        action_h = x[:, 3 : 3 + self.action_chunk]  # [B, chunk, H]
 
         # Heads — produce shapes that match the targets the dataloader emits.
-        # rgb / depth / flow targets are [B, T_total, N, D]; we tile back.
+        # rgb / depth targets are [B, T_total, N, D]; we tile back.
         T_total = rgb_dino_seq.shape[1]
         N = rgb_dino_seq.shape[2]
         rgb_pred = self.rgb_head(rgb_h).unsqueeze(1).unsqueeze(1).expand(b, T_total, N, -1)
         depth_pred = self.depth_head(depth_h).unsqueeze(1).unsqueeze(1).expand(b, T_total, N, -1)
-        flow_pred = self.flow_head(flow_h).unsqueeze(1).unsqueeze(1).expand(b, T_total, N, -1)
         action_pred = self.action_head(action_h)  # [B, chunk, action_dim]
 
         return {
             "action": action_pred,
             "image": rgb_pred,
             "depth": depth_pred,
-            "flow": flow_pred,
             "geom": {"depth_dino_pred": depth_pred, "rgb_dino_pred": rgb_pred},
-            "flow_act": {
-                "proprio": proprio,
-                "action_chunk": action_noisy,
-                "flow_dino_pred": flow_pred,
-            },
         }
 
 
@@ -510,7 +484,6 @@ class _USAMTrainConfig:
     action_chunk: int = 8
     rgb_dim: int = 768
     depth_dim: int = 768
-    flow_dim: int = 768
     proprio_dim: int = 50
     n_keep_tokens: int = 65
     n_plan_tokens: int = 32
@@ -538,8 +511,8 @@ class USAMTrainModel(nn.Module):
     2. Refreshes the plan cache (and pushes a snapshot to its history).
     3. **Calls** :func:`apply_cache_dropout` to maybe substitute a stale
        cache for this step.
-    4. Runs the SmokePlayer to produce the four velocity predictions
-       plus the geom/flow_act sub-dicts.
+    4. Runs the SmokePlayer to produce the three velocity predictions
+       plus the geom sub-dict.
     5. Builds drift + subtask predictions.
     6. Aggregates with :class:`USAMUnifiedLoss` and returns
        ``(total_loss, per_loss_dict)``.
@@ -572,7 +545,6 @@ class USAMTrainModel(nn.Module):
             hidden_size=cfg.hidden_size,
             rgb_dim=cfg.rgb_dim,
             depth_dim=cfg.depth_dim,
-            flow_dim=cfg.flow_dim,
             num_layers=cfg.num_layers,
             num_heads=cfg.num_heads,
             action_dim=cfg.action_dim,
@@ -603,12 +575,6 @@ class USAMTrainModel(nn.Module):
         self.loss_fn = USAMUnifiedLoss(
             weights=LossWeights(),  # weights are passed per-step
             geom_kwargs={"dim": cfg.rgb_dim, "hidden": 32, "tau": 1.0},
-            flow_act_kwargs={
-                "proprio_dim": cfg.proprio_dim,
-                "action_chunk_dim": cfg.action_dim * cfg.action_chunk,
-                "hidden": 64,
-                "flow_dim": cfg.flow_dim,
-            },
         )
 
         # Plan cache (1 layer of plan tokens — match SmokePlayer's depth).
@@ -687,7 +653,6 @@ class USAMTrainModel(nn.Module):
         # ------------------------------------------------------------------
         rgb = batch["rgb_dino_seq"]  # [B, T, N, D]
         depth = batch.get("depth_dino_seq", torch.zeros_like(rgb))
-        flow = batch.get("flow_dino_seq", torch.zeros_like(rgb))
         proprio = batch["proprio"]
         action_chunk = batch["action_chunk"]
         head_keyframe = batch.get("head_keyframe_rgb_dino")
@@ -704,7 +669,6 @@ class USAMTrainModel(nn.Module):
         compute_dtype = next(self.player.parameters()).dtype
         rgb = rgb.to(compute_dtype)
         depth = depth.to(compute_dtype)
-        flow = flow.to(compute_dtype)
         proprio = proprio.to(compute_dtype)
         action_chunk = action_chunk[..., : self.cfg.action_dim].to(compute_dtype)
         head_keyframe = head_keyframe.to(compute_dtype)
@@ -723,7 +687,7 @@ class USAMTrainModel(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # 3. Player forward — emits the four velocity heads.
+        # 3. Player forward — emits the three velocity heads.
         # The dataloader does not provide ground-truth velocity targets —
         # the production scheduler does. For the smoke run we use the
         # *input* features as targets for the modality heads, and the
@@ -737,7 +701,6 @@ class USAMTrainModel(nn.Module):
         preds = self.player(
             rgb_dino_seq=rgb,
             depth_dino_seq=depth,
-            flow_dino_seq=flow,
             proprio=proprio,
             action_noisy=action_noisy,
             plan_cache=active_cache,
@@ -773,7 +736,6 @@ class USAMTrainModel(nn.Module):
             "action": action_chunk,
             "image": rgb,
             "depth": depth,
-            "flow": flow,
             "drift": drift_target,
             "subtask": subtask_label,
         }

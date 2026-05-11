@@ -67,8 +67,6 @@ _MP4_RESOLUTIONS: dict[str, tuple[int, int] | None] = {
     "wrist_rgb_right": (378, 378),
     "head_depth": (192, 192),
     "wrist_depth": (192, 192),
-    "head_flow": (378, 378),
-    "wrist_flow": (378, 378),
 }
 
 _SAFETENSORS_DTYPE: str = "F16"

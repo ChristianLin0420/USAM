@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 """Stage 4: fp16 Tri-DINO feature caching (Phase 1 — DROID only).
 
-For each chunk of staged RGB / depth / flow frames, runs
+For each chunk of staged RGB / depth frames, runs
 :meth:`usam.encoders.tri_dino.TriDINOTower.extract_features` and writes the
 result as memory-mapped safetensors shards consumed by
 :class:`usam.dataloader.feature_cache.FeatureCache`.
@@ -88,7 +88,7 @@ def _stride_to_cache_fps(num_frames: int, source_fps: int, cache_fps: int) -> Li
 def encode_chunk(
     staged_chunk_dir: Path,
     output_root: Path,
-    modalities: Iterable[str] = ("rgb", "depth", "flow"),
+    modalities: Iterable[str] = ("rgb", "depth"),
     cameras: Iterable[str] = ("head_rgb", "wrist_rgb"),
     dinov3_ckpt: Optional[Path] = None,
     dinov3_arch: str = "vit_b_16",
@@ -144,7 +144,6 @@ def encode_chunk(
                 file_for_modality = {
                     "rgb": ep_dir / f"camera_{cam}.npy",
                     "depth": ep_dir / f"depth_{cam}.npy",
-                    "flow": ep_dir / f"flow_{cam}.npy",
                 }[mod]
                 if not file_for_modality.exists():
                     continue
@@ -191,11 +190,6 @@ def _encode_modality(
             t = torch.as_tensor(x).permute(0, 3, 1, 2).contiguous().float() / 255.0
         elif modality == "depth":
             t = torch.as_tensor(x).unsqueeze(1).contiguous().float() / 1000.0
-        elif modality == "flow":
-            # Magnitude-scaling correction is deferred; the flow
-            # patch_embed is retrained via Phase A.5 adapter pretraining,
-            # so absolute flow magnitudes here are not load-bearing.
-            t = torch.as_tensor(x).permute(0, 3, 1, 2).contiguous().float()
         else:
             raise ValueError(f"unknown modality {modality}")
         if t.shape[-2:] != tuple(cfg.target_hw):
@@ -315,7 +309,7 @@ def _encode_chunk_worker(
 def encode_chunk_multigpu(
     staged_chunk_dir: Path,
     output_root: Path,
-    modalities: Iterable[str] = ("rgb", "depth", "flow"),
+    modalities: Iterable[str] = ("rgb", "depth"),
     cameras: Iterable[str] = ("head_rgb", "wrist_rgb"),
     dinov3_ckpt: Optional[Path] = None,
     dinov3_arch: str = "vit_b_16",

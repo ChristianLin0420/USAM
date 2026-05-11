@@ -141,7 +141,6 @@ class SmokePolicy:
         """
         rgb = observation["rgb_dino_seq"].to(self.device)
         depth = observation.get("depth_dino_seq")
-        flow = observation.get("flow_dino_seq")
         proprio = observation["proprio"].to(self.device)
 
         # Mirror the dtype / device handling done by training_step.
@@ -151,10 +150,6 @@ class SmokePolicy:
             depth = torch.zeros_like(rgb)
         else:
             depth = depth.to(self.device).to(compute_dtype)
-        if flow is None:
-            flow = torch.zeros_like(rgb)
-        else:
-            flow = flow.to(self.device).to(compute_dtype)
         proprio = proprio.to(compute_dtype)
 
         head_keyframe = observation.get("head_keyframe_rgb_dino")
@@ -179,7 +174,6 @@ class SmokePolicy:
         preds = self.model.player(
             rgb_dino_seq=rgb,
             depth_dino_seq=depth,
-            flow_dino_seq=flow,
             proprio=proprio,
             action_noisy=action_zero,
             plan_cache=self.model.plan_cache,
@@ -442,7 +436,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         data_root,
         split=str(data_cfg.get("split", "train")),
         use_cached_features=bool(data_cfg.get("use_cached_features", True)),
-        modalities=list(data_cfg.get("modalities", ["rgb", "depth", "flow"])),
+        modalities=list(data_cfg.get("modalities", ["rgb", "depth"])),
         cameras=list(data_cfg.get("cameras", ["head_rgb"])),
         history_frames=int(data_cfg.get("history_frames", 4)),
         future_frames=int(data_cfg.get("future_frames", 8)),

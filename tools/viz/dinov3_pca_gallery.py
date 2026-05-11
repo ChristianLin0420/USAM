@@ -1,9 +1,9 @@
-"""DINOv3 + depth + flow visualization gallery for a USAM prep chunk.
+"""DINOv3 + depth visualization gallery for a USAM prep chunk.
 
 For each (episode, camera) in /workspace/output/staged, samples N frames
-evenly and saves a 4-column side-by-side image:
+evenly and saves a 3-column side-by-side image:
 
-    [   RGB   |  DINOv3 PCA  |   Depth viz   |    Flow viz   ]
+    [   RGB   |  DINOv3 PCA  |   Depth viz   ]
 
   * RGB:   the original frame, resized to 448×448 (the DINOv3 input
            resolution).
@@ -14,9 +14,6 @@ evenly and saves a 4-column side-by-side image:
   * Depth: per-frame min-max normalized + viridis colormap, upscaled to
            448×448. Black = far, yellow = near (DA3MONO-LARGE outputs
            metric mm depth, so smaller = nearer).
-  * Flow:  HSV-encoded (hue = direction, saturation = constant 255,
-           value = magnitude), upscaled to 448×448. Static background
-           ≈ black; moving regions take on direction-specific colors.
 
 Output lands under /workspace/output/viz/dinov3_chunk0/ with an
 index.html that groups frames by (episode, camera).
@@ -37,7 +34,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 warnings.filterwarnings("ignore")
 
 STAGED = Path("/workspace/output/staged")
-FLOW_OUT = Path("/workspace/output/flow")
 DEPTH_OUT = Path("/workspace/output/depth")
 VIZ_OUT = Path("/workspace/output/viz/dinov3_chunk0")
 FRAMES_PER_EP_CAM = 10  # 10 frames per (episode, camera)
@@ -84,27 +80,6 @@ def depth_viz(depth_uint16: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def flow_viz(flow_fp16: np.ndarray) -> np.ndarray:
-    """[H, W, 2] (uv) -> [H, W, 3] uint8 RGB (HSV-encoded).
-
-    Hue   = atan2(v, u) (direction)
-    Sat   = 255
-    Value = magnitude (per-frame max-normalized)
-
-    Mirrors the RAFT reference visualization.
-    """
-    f = flow_fp16.astype(np.float32)
-    fx, fy = f[..., 0], f[..., 1]
-    mag, ang = cv2.cartToPolar(fx, fy)
-    hsv = np.zeros((*f.shape[:2], 3), dtype=np.uint8)
-    hsv[..., 0] = (ang * 180.0 / np.pi / 2.0).astype(np.uint8)
-    hsv[..., 1] = 255
-    if mag.max() > 1e-3:
-        mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
-        hsv[..., 2] = mag_norm.astype(np.uint8)
-    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-
-
 def main() -> int:
     VIZ_OUT.mkdir(parents=True, exist_ok=True)
 
@@ -131,11 +106,9 @@ def main() -> int:
             if not rgb_path.exists():
                 continue
             depth_path = DEPTH_OUT / ep_id / f"depth_{cam}.npy"
-            flow_path = FLOW_OUT / ep_id / f"flow_{cam}.npy"
 
             arr_rgb = np.load(rgb_path)            # [T, H, W, 3] uint8
             arr_depth = np.load(depth_path) if depth_path.exists() else None
-            arr_flow = np.load(flow_path) if flow_path.exists() else None
 
             T = arr_rgb.shape[0]
             idxs = np.linspace(0, T - 1, FRAMES_PER_EP_CAM, dtype=int)
@@ -164,18 +137,10 @@ def main() -> int:
                     d_viz = np.zeros((*TARGET_HW, 3), dtype=np.uint8)
                 depth_448 = cv2.resize(d_viz, TARGET_HW[::-1], interpolation=cv2.INTER_AREA)
 
-                # ----- Flow (T-1 frames; last frame replays previous flow)
-                if arr_flow is not None:
-                    flow_idx = min(t, arr_flow.shape[0] - 1)
-                    f_viz = flow_viz(arr_flow[flow_idx])
-                else:
-                    f_viz = np.zeros((*TARGET_HW, 3), dtype=np.uint8)
-                flow_448 = cv2.resize(f_viz, TARGET_HW[::-1], interpolation=cv2.INTER_AREA)
+                # ----- 3-column composite (448 x 1344 x 3)
+                sxs = np.concatenate([rgb_448, pca_448, depth_448], axis=1)
 
-                # ----- 4-column composite (448 x 1792 x 3)
-                sxs = np.concatenate([rgb_448, pca_448, depth_448, flow_448], axis=1)
-
-                sxs_p = out_dir / f"frame_{i:02d}_t{t:04d}_4col.png"
+                sxs_p = out_dir / f"frame_{i:02d}_t{t:04d}_3col.png"
                 cv2.imwrite(str(sxs_p), cv2.cvtColor(sxs, cv2.COLOR_RGB2BGR))
                 rel = sxs_p.relative_to(VIZ_OUT).as_posix()
                 gallery_entries.append((f"{ep_id} / {cam} / t={t}", rel))
@@ -187,18 +152,17 @@ def main() -> int:
             "<style>",
             "body{font-family:sans-serif;background:#1a1a1a;color:#eee;margin:20px;}",
             "h1{color:#aef;} h2{color:#fea;margin-top:30px;border-bottom:1px solid #555;padding-bottom:4px;}",
-            ".panels{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;",
-            "        max-width:1820px;margin:6px 0 16px 0;color:#aaa;font-size:0.85em;}",
+            ".panels{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;",
+            "        max-width:1380px;margin:6px 0 16px 0;color:#aaa;font-size:0.85em;}",
             "img{display:block;margin:6px 0 4px 0;max-width:100%;width:100%;}",
             ".row{margin:18px 0;border:1px solid #333;padding:8px;border-radius:4px;background:#222;}",
             ".label{color:#bbb;font-size:0.9em;margin-bottom:4px;}",
             "</style></head><body>",
-            "<h1>USAM prep chunk-0 — RGB · DINOv3 PCA · Depth · Flow</h1>",
-            "<p>Each row shows one frame's four panels in order:",
+            "<h1>USAM prep chunk-0 — RGB · DINOv3 PCA · Depth</h1>",
+            "<p>Each row shows one frame's three panels in order:",
             " <b>RGB</b> (original 448×448 input) ·",
             " <b>DINOv3 PCA</b> (1024-D patch tokens projected to 3 channels, 28×28 grid) ·",
-            " <b>Depth</b> (DA3MONO-LARGE, viridis colormap; near=yellow, far=purple) ·",
-            " <b>Flow</b> (SEA-RAFT-M, HSV-encoded; hue=direction, value=magnitude).</p>"]
+            " <b>Depth</b> (DA3MONO-LARGE, viridis colormap; near=yellow, far=purple).</p>"]
     last_section = None
     for label, rel in gallery_entries:
         section = label.rsplit(" / ", 1)[0]
@@ -208,12 +172,12 @@ def main() -> int:
         html.append(
             f'<div class="row"><div class="label">{escape(label)}</div>'
             f'<img src="{escape(rel)}" alt="{escape(label)}">'
-            f'<div class="panels"><span>RGB</span><span>DINOv3 PCA</span><span>Depth (viridis)</span><span>Flow (HSV)</span></div>'
+            f'<div class="panels"><span>RGB</span><span>DINOv3 PCA</span><span>Depth (viridis)</span></div>'
             f'</div>'
         )
     html.append("</body></html>")
     (VIZ_OUT / "index.html").write_text("\n".join(html))
-    print(f"\nwrote {len(gallery_entries)} 4-column frames + index.html under {VIZ_OUT}", flush=True)
+    print(f"\nwrote {len(gallery_entries)} 3-column frames + index.html under {VIZ_OUT}", flush=True)
     return 0
 
 

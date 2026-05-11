@@ -7,7 +7,7 @@ Two tests:
   5 training steps on the synthesized ``tiny_droid`` fixture with the
   ``usam_350m_smoke`` config. Verifies that:
 
-  - All four flow-matching losses + auxiliary losses produce gradients.
+  - All three flow-matching losses + auxiliary losses produce gradients.
   - ``apply_cache_dropout`` is exercised at least once.
   - The total wall-clock is < 60 s on CPU.
 

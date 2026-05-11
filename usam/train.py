@@ -17,7 +17,7 @@ adds USAM-specific wiring:
   call ``apply_cache_dropout(cache, t)`` with the global step ``t``.
 
 * **Ramped loss weights** — :func:`compute_ramped_weights` linearly ramps
-  ``geom`` and ``flow_act`` from ``0`` to their YAML targets over the
+  ``geom`` from ``0`` to its YAML target over the
   first 50_000 steps (clamped after). The exact arithmetic is
 
       w_t = target * min(step / 50_000, 1.0)         when step > 0
@@ -273,7 +273,7 @@ def build_dataloader(
     fps_features = int(data_cfg.get("fps_features", 5))
     fps_action = int(data_cfg.get("fps_action", 30))
     cameras = list(data_cfg.get("cameras", ["head_rgb"]))
-    modalities = list(data_cfg.get("modalities", ["rgb", "depth", "flow"]))
+    modalities = list(data_cfg.get("modalities", ["rgb", "depth"]))
 
     ds = USAMLeRobotDataset(
         data_root,
@@ -330,37 +330,30 @@ def _collate(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Loss-weights helpers
 # ---------------------------------------------------------------------------
-def build_base_loss_weights(cfg: Dict[str, Any]) -> tuple[LossWeights, float, float]:
+def build_base_loss_weights(cfg: Dict[str, Any]) -> tuple[LossWeights, float]:
     """Read ``loss_weights:`` from the YAML.
 
     Returns
     -------
-    (base, geom_target, flow_act_target) : tuple
-        ``base`` is the steady-state weights with ``geom = flow_act = 0.0``
-        (they're ramped externally per :func:`compute_ramped_weights`).
-        ``geom_target`` and ``flow_act_target`` are the YAML's
-        ``geom_target`` and ``flow_act_target`` keys.
+    (base, geom_target) : tuple
+        ``base`` is the steady-state weights with ``geom = 0.0``
+        (ramped externally per :func:`compute_ramped_weights`).
+        ``geom_target`` is the YAML's ``geom_target`` key.
     """
     lw_cfg = cfg.get("loss_weights", {})
     base = LossWeights(
         action=float(lw_cfg.get("action", 1.0)),
         rgb=float(lw_cfg.get("rgb", 1.0)),
         depth=float(lw_cfg.get("depth", 0.3)),
-        flow=float(lw_cfg.get("flow", 0.3)),
         geom=0.0,
-        flow_act=0.0,
         drift=float(lw_cfg.get("drift", 0.1)),
         subtask=float(lw_cfg.get("subtask", 0.1)),
     )
-    # The plan calls these `geom_max` / `flow_act_max`; we accept either
-    # spelling for forward compatibility with §6.2's YAML snippet.
+    # The plan calls this `geom_max`; accept either spelling.
     geom_target = float(
         lw_cfg.get("geom_target", lw_cfg.get("geom_max", 0.05))
     )
-    flow_act_target = float(
-        lw_cfg.get("flow_act_target", lw_cfg.get("flow_act_max", 0.05))
-    )
-    return base, geom_target, flow_act_target
+    return base, geom_target
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +375,6 @@ def build_model_from_cfg(model_cfg: Dict[str, Any]) -> USAMTrainModel:
         action_chunk=int(action_head.get("action_horizon", 8)),
         rgb_dim=int(encoder.get("embed_dim", 768)),
         depth_dim=int(encoder.get("embed_dim", 768)),
-        flow_dim=int(encoder.get("embed_dim", 768)),
         proprio_dim=int(player.get("proprio_dim", 50)),
         n_keep_tokens=int(encoder.get("cache_n_keep_tokens", 64)) + 1,
         n_plan_tokens=int(conductor.get("n_plan_tokens", 32)),
@@ -406,7 +398,7 @@ def _data_iter_forever(loader: DataLoader) -> Iterator[Dict[str, Any]]:
 _PARAM_GROUPS = (
     ("encoder", ("encoder.", "tri_dino.", "dinov3.")),
     ("player", ("player.",)),
-    ("aux", ("aux.", "geom_loss.", "flow_act_loss.")),
+    ("aux", ("aux.", "geom_loss.")),
     ("drift", ("drift_mlp.",)),
     ("subtask", ("subtask_head.",)),
 )
@@ -473,7 +465,7 @@ def _batch_stats(batch: Dict[str, Any]) -> Dict[str, float]:
 
 
 def _ramp_fractions(step: int, ramp_steps: int) -> Dict[str, float]:
-    """Linear-ramp progress for the geom + flow_act aux heads, in [0, 1]."""
+    """Linear-ramp progress for the geom aux head, in [0, 1]."""
     if ramp_steps <= 0:
         frac = 1.0
     elif step <= 0:
@@ -482,7 +474,7 @@ def _ramp_fractions(step: int, ramp_steps: int) -> Dict[str, float]:
         frac = 1.0
     else:
         frac = float(step) / float(ramp_steps)
-    return {"ramp/geom_frac": frac, "ramp/flow_act_frac": frac}
+    return {"ramp/geom_frac": frac}
 
 
 def _summary_stats(losses: List[float]) -> Dict[str, float]:
@@ -529,7 +521,6 @@ def train_loop(
     dataloader: DataLoader,
     base_weights: LossWeights,
     geom_target: float,
-    flow_act_target: float,
     *,
     max_steps: int,
     device: torch.device,
@@ -563,13 +554,12 @@ def train_loop(
         # Move tensor batch entries to the device.
         batch = _to_device(batch, device, weights_dtype)
 
-        # Linear ramp of geom + flow_act weights from 0 → target across
+        # Linear ramp of geom weight from 0 → target across
         # the first `ramp_steps` (=50_000) steps.
         weights = compute_ramped_weights(
             base=base_weights,
             step=step,
             geom_target=geom_target,
-            flow_act_target=flow_act_target,
             ramp_steps=ramp_steps,
         )
 
@@ -796,7 +786,7 @@ def run(
     # ------------------------------------------------------------------
     # Loss schedule
     # ------------------------------------------------------------------
-    base_weights, geom_target, flow_act_target = build_base_loss_weights(train_cfg)
+    base_weights, geom_target = build_base_loss_weights(train_cfg)
     ramp_steps = int(train_cfg.get("loss_weights", {}).get("ramp_steps", 50_000))
 
     # ------------------------------------------------------------------
@@ -836,7 +826,6 @@ def run(
             dataloader=loader,
             base_weights=base_weights,
             geom_target=geom_target,
-            flow_act_target=flow_act_target,
             max_steps=max_steps,
             device=device,
             weights_dtype=weights_dtype,
@@ -860,7 +849,6 @@ def run(
             dataloader=loader,
             base_weights=base_weights,
             geom_target=geom_target,
-            flow_act_target=flow_act_target,
             max_steps=max_steps,
             device=device,
             weights_dtype=weights_dtype,

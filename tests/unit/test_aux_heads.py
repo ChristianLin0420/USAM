@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: MIT
 """Unit tests for the USAM auxiliary heads.
 
-We exercise both heads at a very small ``D`` so the numeric gradient checks
-in :func:`torch.autograd.gradcheck` finish in seconds:
-
-* ``GeomConsistencyLoss`` is constructed with ``dim=64``; the depth /
-  near-field heads are randomly initialised (the test instantiates
-  with ``dav2_distill_ckpt=None`` and silences the resulting warning).
-* ``FlowActionConsistencyLoss`` uses ``flow_dim=64`` to match.
+We exercise the geom head at a very small ``D`` so the numeric gradient
+check in :func:`torch.autograd.gradcheck` finishes in seconds.
+``GeomConsistencyLoss`` is constructed with ``dim=64``; the depth /
+near-field heads are randomly initialised (the test instantiates
+with ``dav2_distill_ckpt=None`` and silences the resulting warning).
 
 The test batch / time / patch / latent shape ``[B=2, T=3, N=8, D=64]`` is
 the fixture mandated by the agent prompt.
@@ -21,7 +19,6 @@ import pytest
 import torch
 
 from usam.aux_heads import (
-    FlowActionConsistencyLoss,
     GeomConsistencyLoss,
     soft_rank,
     soft_spearman,
@@ -40,20 +37,6 @@ def _make_geom_loss(dim: int = 64, hidden: int = 16, tau: float = 1.0) -> GeomCo
         return GeomConsistencyLoss(dim=dim, hidden=hidden, tau=tau)
 
 
-def _make_flow_act_loss(
-    proprio_dim: int = 4,
-    chunk_dim: int = 6,
-    hidden: int = 16,
-    flow_dim: int = 64,
-) -> FlowActionConsistencyLoss:
-    return FlowActionConsistencyLoss(
-        proprio_dim=proprio_dim,
-        action_chunk_dim=chunk_dim,
-        hidden=hidden,
-        flow_dim=flow_dim,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Shape / scalar sanity
 # ---------------------------------------------------------------------------
@@ -64,17 +47,6 @@ def test_geom_loss_returns_scalar() -> None:
     out = loss_fn(depth, rgb)
     assert out.dim() == 0, f"expected scalar, got {tuple(out.shape)}"
     assert torch.isfinite(out)
-
-
-def test_flow_act_loss_returns_scalar() -> None:
-    loss_fn = _make_flow_act_loss()
-    proprio = torch.randn(2, 4)
-    action_chunk = torch.randn(2, 6)
-    flow_pred = torch.randn(2, 3, 8, 64)
-    out = loss_fn(proprio, action_chunk, flow_pred)
-    assert out.dim() == 0, f"expected scalar, got {tuple(out.shape)}"
-    assert torch.isfinite(out)
-    assert (out >= 0).item(), "MSE loss must be non-negative"
 
 
 # ---------------------------------------------------------------------------
@@ -159,24 +131,6 @@ def test_geom_loss_gradcheck() -> None:
     assert torch.autograd.gradcheck(fn, (depth, rgb), eps=1e-6, atol=1e-4, rtol=1e-3)
 
 
-def test_flow_act_loss_gradcheck() -> None:
-    torch.manual_seed(0)
-    loss_fn = _make_flow_act_loss(
-        proprio_dim=4, chunk_dim=6, hidden=16, flow_dim=64
-    ).double()
-
-    proprio = torch.randn(2, 4, dtype=torch.float64, requires_grad=True)
-    action = torch.randn(2, 6, dtype=torch.float64, requires_grad=True)
-    flow = torch.randn(2, 3, 8, 64, dtype=torch.float64, requires_grad=True)
-
-    def fn(
-        p: torch.Tensor, a: torch.Tensor, f: torch.Tensor
-    ) -> torch.Tensor:
-        return loss_fn(p, a, f)
-
-    assert torch.autograd.gradcheck(fn, (proprio, action, flow), eps=1e-6, atol=1e-4, rtol=1e-3)
-
-
 # ---------------------------------------------------------------------------
 # Consistent vs inconsistent sanity (smoke)
 # ---------------------------------------------------------------------------
@@ -216,44 +170,6 @@ def test_geom_loss_consistent_lower_than_inconsistent() -> None:
 
     loss_consistent = loss_fn(depth, rgb_consistent).item()
     loss_inconsistent = loss_fn(depth, rgb_inconsistent).item()
-    assert loss_consistent < loss_inconsistent, (
-        f"expected consistent < inconsistent, got {loss_consistent} vs {loss_inconsistent}"
-    )
-
-
-def test_flow_act_loss_consistent_lower_than_inconsistent() -> None:
-    """Loss should be lower when ``g_phi`` already predicts something close
-    to the empirical ``flow_magnitude`` than when the two disagree.
-
-    The fixed flow decoder is ``mean_n((flow_n @ decode_w)^2)``. If we set
-    ``flow = α * decode_w`` (broadcast across patches and time), then
-    ``decode_w`` is unit-norm so ``flow @ decode_w == α`` per patch and the
-    decoded magnitude is ``α^2``. We pick ``α`` such that ``α^2`` lands at
-    ``g_phi``'s bias output (the "consistent" target) and far above it
-    (the "inconsistent" target).
-    """
-    torch.manual_seed(0)
-    loss_fn = _make_flow_act_loss(
-        proprio_dim=4, chunk_dim=6, hidden=16, flow_dim=64
-    )
-    loss_fn.eval()
-
-    proprio = torch.zeros(2, 4)
-    action = torch.zeros(2, 6)
-    with torch.no_grad():
-        bias_pred = loss_fn.g_phi(torch.cat([proprio, action], dim=-1))  # [B]
-    # We want α^2 == bias_pred, so α = sqrt(|bias_pred|) carrying the sign
-    # of bias_pred via post-hoc sign of α (square removes it). Clamp away
-    # from 0 so the inconsistent case can move to a much larger magnitude.
-    target_mag = bias_pred.detach().clamp_min(1e-3)  # [B]
-    alpha = target_mag.sqrt().reshape(2, 1, 1, 1)
-
-    decode_w = loss_fn.decode_weight  # [D]
-    flow_consistent = alpha * decode_w.reshape(1, 1, 1, -1).expand(2, 3, 8, -1).contiguous()
-    flow_inconsistent = (alpha + 50.0) * decode_w.reshape(1, 1, 1, -1).expand(2, 3, 8, -1).contiguous()
-
-    loss_consistent = loss_fn(proprio, action, flow_consistent).item()
-    loss_inconsistent = loss_fn(proprio, action, flow_inconsistent).item()
     assert loss_consistent < loss_inconsistent, (
         f"expected consistent < inconsistent, got {loss_consistent} vs {loss_inconsistent}"
     )

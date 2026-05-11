@@ -97,7 +97,7 @@ def _bgr_to_rgb(frames: np.ndarray) -> np.ndarray:
     We avoid the cv2 dependency at import time by doing the swap manually; the
     behaviour is identical to ``cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)`` (a
     pure index reversal on the last axis). cv2 is still imported lazily by the
-    flow / depth stages.
+    depth stage.
     """
     assert frames.shape[-1] == 3, frames.shape
     return frames[..., ::-1].copy()

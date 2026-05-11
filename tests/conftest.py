@@ -132,7 +132,7 @@ def mock_conductor() -> Any:
 def mock_player() -> Callable[..., Any]:
     """A toy "player" callable matching the :class:`RealtimeController` contract.
 
-    The signature is ``(rgb_dino, depth_dino, flow_dino, proprio,
+    The signature is ``(rgb_dino, depth_dino, proprio,
     plan_cache, n_steps) -> Tensor[B, 16, 7]``. The tensor body is derived
     from the inputs so smoke tests can verify wiring without sourcing a real
     diffusion player. Reads the layer-0 image-branch K/V to exercise the
@@ -144,7 +144,6 @@ def mock_player() -> Callable[..., Any]:
     def _player(
         rgb_dino: Tensor,
         depth_dino: Tensor | None,
-        flow_dino: Tensor | None,
         proprio: Tensor,
         plan_cache: Any,
         n_steps: int,
