@@ -58,12 +58,11 @@ RUN pip install --no-cache-dir -r /tmp/base.txt \
     && pip install --no-cache-dir -r /tmp/prep.txt
 
 # =============================================================================
-# Vision Models (cloned from GitHub — neither is on PyPI)
+# Vision Models (cloned from GitHub — research repos, mixed install styles)
 # =============================================================================
-# SEA-RAFT (optical flow) and Depth-Anything-V2 (depth) are research repos
-# that ship no pip-installable manifest. We clone shallow copies and wire them
-# up so prep/stage_2b_compute_flow.py and prep/stage_2c_compute_depth.py can
-# import them.
+# SEA-RAFT (optical flow) and Depth-Anything-V3 (depth) are research repos.
+# Depth-Anything-V2 is kept here for backward compatibility but is being
+# phased out in favor of DA3 — remove it in a follow-up.
 #
 # SEA-RAFT:
 #   The repo's Python code lives in core/ (raft.py, etc.) and expects
@@ -72,7 +71,12 @@ RUN pip install --no-cache-dir -r /tmp/base.txt \
 #   sea_raft/ shim package at /opt/searaft/sea_raft/ that wraps the
 #   underlying RAFT class (which uses PyTorchModelHubMixin for HF loading).
 #
-# Depth-Anything-V2:
+# Depth-Anything-V3:
+#   Pip-installable from GitHub (src/ layout, hatchling build). Provides
+#   `from depth_anything_3.api import DepthAnything3` with
+#   ``DepthAnything3.from_pretrained(...)`` for HF Hub loading.
+#
+# Depth-Anything-V2 (deprecated, kept for back-compat):
 #   The repo ships a depth_anything_v2/ directory with relative imports
 #   (.dinov2, .util.blocks, etc.) but is missing the __init__.py files that
 #   make it importable as a Python package. We touch those files so that
@@ -112,8 +116,10 @@ def load_searaft(ckpt_path: str) -> RAFT:
     Parameters
     ----------
     ckpt_path : str
-        Either a path to a local checkpoint file (*.pth / *.pt) or a
-        HuggingFace Hub model ID (e.g. ``"princeton-vl/SEA-RAFT-M"``).
+        Either a path to a local checkpoint file (*.pth / *.pt), a local
+        directory baked by ``hf download`` containing ``model.safetensors``
+        + ``config.json``, or a HuggingFace Hub model ID (e.g.
+        ``"princeton-vl/SEA-RAFT-L"`` or ``"princeton-vl/SEA-RAFT-M"``).
 
     Returns
     -------
@@ -133,17 +139,43 @@ def load_searaft(ckpt_path: str) -> RAFT:
         sd = torch.load(ckpt_path, map_location="cpu")
         model.load_state_dict(sd, strict=False)
     else:
-        # Treat as HuggingFace Hub model ID — RAFT inherits from_pretrained.
-        model = RAFT.from_pretrained(ckpt_path)
+        # HF Hub model ID (or a local snapshot dir). RAFT.from_pretrained
+        # requires an ``args`` config object — we resolve it from the bundled
+        # ``config/eval/spring-{L,M,S}.json`` files in the cloned SEA-RAFT
+        # repo, picking the variant from the model id suffix.
+        variant = "L"
+        for tag in ("-L", "-M", "-S"):
+            if tag in ckpt_path:
+                variant = tag.lstrip("-")
+                break
+        eval_cfg = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "config", "eval", f"spring-{variant}.json",
+        )
+        if not os.path.isfile(eval_cfg):
+            raise FileNotFoundError(
+                f"SEA-RAFT eval config not found: {eval_cfg} "
+                f"(needed to instantiate RAFT for HF Hub id {ckpt_path!r})"
+            )
+        args = json_to_args(eval_cfg)
+        model = RAFT.from_pretrained(ckpt_path, args=args)
     return model.eval()
 
 
 __all__ = ["load_searaft"]
 PYEOF
 
-# --- Depth-Anything-V2: add missing __init__.py files ---
+# --- Depth-Anything-V2: add missing __init__.py files (deprecated, kept for back-compat) ---
 RUN touch /opt/dav2/depth_anything_v2/__init__.py \
     && touch /opt/dav2/depth_anything_v2/util/__init__.py
+
+# --- Depth-Anything-V3: pip-install from GitHub ---
+# The DA3 repo has a proper pyproject.toml (hatchling) and ships the package
+# under src/depth_anything_3/. ``pip install git+...`` builds & installs it
+# into the global site-packages, so we don't need a clone-and-PYTHONPATH dance.
+# We intentionally do not install the optional ``[app]`` / ``[gs]`` extras
+# (gradio, gsplat) — prep nodes only need the base inference path.
+RUN pip install --no-cache-dir "git+https://github.com/ByteDance-Seed/Depth-Anything-3.git@main#egg=depth-anything-3"
 
 # =============================================================================
 # Project Source
@@ -174,6 +206,29 @@ RUN --mount=type=secret,id=hf_token,required=false \
     && hf download "${DINOV3_MODEL}" \
         --local-dir "/opt/dinov3-cache/${DINOV3_MODEL}" \
     && python -c "from transformers import AutoModel; m = AutoModel.from_pretrained('${DINOV3_MODEL}'); print(f'✓ DINOv3 baked: hidden={m.config.hidden_size} patch={m.config.patch_size}')" \
+    && unset HUGGING_FACE_HUB_TOKEN HF_TOKEN
+
+# =============================================================================
+# Pre-download SEA-RAFT-L + Depth-Anything-V3 (DA3MONO-LARGE) Checkpoints
+# =============================================================================
+# Bake both checkpoints into the image so prep nodes can run offline. The two
+# bakes share the same hf_token secret as the DINOv3 bake above.
+#
+# Outputs:
+#   /opt/searaft-ckpt/sea-raft-l/   (model.safetensors + config.json snapshot)
+#   ${HF_HOME}/hub/...              (DA3 weights, primed by from_pretrained)
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ -n "$HF_TOKEN" ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$(printf '%s' "$HF_TOKEN" | tr -d '[:space:]')"; \
+    elif [ -f /run/secrets/hf_token ]; then \
+        export HUGGING_FACE_HUB_TOKEN="$(tr -d '[:space:]' < /run/secrets/hf_token)"; \
+    fi \
+    && export HF_TOKEN="$HUGGING_FACE_HUB_TOKEN" \
+    && mkdir -p /opt/searaft-ckpt/sea-raft-l \
+    && hf download princeton-vl/SEA-RAFT-L \
+        --local-dir /opt/searaft-ckpt/sea-raft-l \
+    && python -c "from depth_anything_3.api import DepthAnything3; m = DepthAnything3.from_pretrained('depth-anything/DA3MONO-LARGE'); print('✓ DA3MONO-LARGE baked')" \
+    && python -c "import sys; sys.path.insert(0, '/opt/searaft'); from sea_raft.api import load_searaft; m = load_searaft('princeton-vl/SEA-RAFT-L'); print('✓ SEA-RAFT-L baked')" \
     && unset HUGGING_FACE_HUB_TOKEN HF_TOKEN
 
 # Lock runtime to offline mode — Slurm compute nodes must not call HF.
@@ -217,7 +272,8 @@ RUN python -c "import torch; print(f'✓ PyTorch: {torch.__version__}')" && \
     python -c "from prep import stage_4_dino_cache; print('✓ prep.stage_4_dino_cache OK')" && \
     python -c "from prep import stage_2b_compute_flow, stage_2c_compute_depth; print('✓ prep.stage_2b/2c OK')" && \
     python -c "from sea_raft.api import load_searaft; print('✓ SEA-RAFT shim importable')" && \
-    python -c "from depth_anything_v2.dpt import DepthAnythingV2; print('✓ Depth-Anything-V2 importable')"
+    python -c "from depth_anything_v2.dpt import DepthAnythingV2; print('✓ Depth-Anything-V2 importable')" && \
+    python -c "from depth_anything_3.api import DepthAnything3; print('✓ Depth-Anything-V3 importable')"
 
 # =============================================================================
 # Expose Ports
