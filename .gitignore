@@ -249,3 +249,9 @@ examples/MultiRobot/*
 # stand-in synthesizer from polluting the working tree).
 tests/golden_data/tiny_droid/
 tests/golden_data/tiny_*/
+
+# Test runs (real-data prep validation)
+runs/
+
+# wandb
+wandb/
