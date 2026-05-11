@@ -1,15 +1,25 @@
 # SPDX-License-Identifier: MIT
-"""Stage 2c: depth precompute (Phase 1 — DROID-only DAv2 path).
+"""Stage 2c: depth precompute (Depth-Anything-V3 mono fallback path).
 
-DROID has stereo ZED frames in ``droid_raw``; Phase 1 uses the **mono DAv2
-fallback** path so the dataloader/feature-cache stack can be exercised
-end-to-end without depending on ZED runtime libs. The stereo path will be
-swapped in during Phase 2.
+DROID has stereo ZED frames in ``droid_raw``; we use the **mono DA3 fallback**
+path so the dataloader/feature-cache stack can run end-to-end without
+depending on ZED runtime libs. The stereo path will be swapped in later.
 
 Outputs ``depth_<cam>.npy`` (uint16, mm) per episode and an HEVC ``.mp4`` for
 visualization. The mp4 encode step lives in pipeline-engineer's
 ``prep/_video.py``; we only emit the npy + a small JSON sidecar that flags
 ``low_quality=True`` so downstream consumers know the depth is monocular.
+
+Model
+-----
+Default checkpoint is ``depth-anything/DA3MONO-LARGE`` from HuggingFace Hub
+(the Depth-Anything-V3 mono-depth large preset). The DA3 ``DepthAnything3``
+class loads via ``PyTorchModelHubMixin.from_pretrained`` and exposes a
+high-level ``.inference(images, ...)`` method that returns a ``Prediction``
+object whose ``.depth`` attribute is a ``[N, H, W]`` numpy array of metric
+depth in meters.
+
+We convert that to ``uint16 mm`` (clipped to ``max_range_mm``) for storage.
 """
 
 from __future__ import annotations
@@ -27,42 +37,62 @@ _LOG = logging.getLogger(__name__)
 
 @dataclass
 class DepthConfig:
-    """Hyperparameters for DAv2 inference."""
+    """Hyperparameters for DA3 inference."""
 
     target_hw: tuple[int, int] = (192, 192)
     batch_size: int = 16
     fp16: bool = True
-    # max range used to scale relative depth to uint16 mm
+    # max range used to clip metric depth (meters -> mm).
     max_range_mm: int = 5000
+    # DA3 processing resolution; the upstream default is 504.
+    process_res: int = 504
 
 
-def _load_dav2(ckpt_path: Path):  # pragma: no cover - lazy
+def _load_dav3(ckpt: Optional[str] = "depth-anything/DA3MONO-LARGE"):  # pragma: no cover - lazy
+    """Lazy-load a frozen Depth-Anything-V3 checkpoint.
+
+    Parameters
+    ----------
+    ckpt : str | None
+        HuggingFace Hub model id (e.g. ``"depth-anything/DA3MONO-LARGE"``) or
+        a local directory containing ``config.json`` + ``model.safetensors``.
+        ``None`` returns ``None`` (smoke-test placeholder path).
+    """
+    if ckpt is None:
+        return None
     try:
-        from depth_anything_v2.dpt import DepthAnythingV2  # type: ignore
-
-        model = DepthAnythingV2(encoder="vitl")
-        import torch
-
-        sd = torch.load(str(ckpt_path), map_location="cpu")
-        model.load_state_dict(sd, strict=False)
-        model.eval().cuda()
-        return model
+        from depth_anything_3.api import DepthAnything3  # type: ignore
     except ImportError as e:
         raise RuntimeError(
-            "depth-anything-v2 is required for stage_2c_compute_depth at runtime"
+            "depth-anything-3 is required for stage_2c_compute_depth at runtime "
+            "(install via `pip install git+https://github.com/ByteDance-Seed/Depth-Anything-3.git` "
+            "or clone to /opt/da3 and add it to PYTHONPATH)"
         ) from e
+    import torch
+
+    model = DepthAnything3.from_pretrained(str(ckpt))
+    if torch.cuda.is_available():
+        model = model.cuda()
+    model.eval()
+    return model
 
 
 def compute_depth_for_chunk(
     staged_chunk_dir: Path,
     output_dir: Path,
     cameras: Iterable[str],
-    dav2_ckpt: Optional[Path] = None,
+    dav3_ckpt: Optional[str] = "depth-anything/DA3MONO-LARGE",
     config: DepthConfig | None = None,
 ) -> List[Path]:
-    """Run DAv2 monocular depth on a chunk of staged RGB frames.
+    """Run DA3 monocular depth on a chunk of staged RGB frames.
 
     Parameters mirror :func:`prep.stage_2b_compute_flow.compute_flow_for_chunk`.
+
+    Parameters
+    ----------
+    dav3_ckpt : str | None
+        HF Hub model id or local path. Defaults to ``depth-anything/DA3MONO-LARGE``.
+        Pass ``None`` to bypass model loading (unit-test smoke path).
 
     Returns
     -------
@@ -76,10 +106,10 @@ def compute_depth_for_chunk(
         _LOG.warning("staged chunk dir %s does not exist; skipping", staged_chunk_dir)
         return written
 
-    model = _load_dav2(dav2_ckpt) if dav2_ckpt is not None else None
+    model = _load_dav3(dav3_ckpt) if dav3_ckpt is not None else None
     if model is None:
         _LOG.warning(
-            "no DAv2 checkpoint provided; stage_2c will run as a structural smoke-test only"
+            "no DA3 checkpoint provided; stage_2c will run as a structural smoke-test only"
         )
 
     cams = list(cameras)
@@ -95,32 +125,130 @@ def compute_depth_for_chunk(
             if model is None:
                 placeholder = np.zeros((T, *cfg.target_hw), dtype=np.uint16)
                 np.save(depth_path, placeholder)
+                source_tag = "placeholder"
             else:  # pragma: no cover
-                depth = _run_dav2(model, rgb, cfg)
+                depth = _run_dav3(model, rgb, cfg)
                 np.save(depth_path, depth.astype(np.uint16))
+                source_tag = "dav3_mono"
             (depth_path.parent / f"depth_{cam}.json").write_text(
-                json.dumps({"low_quality": True, "source": "dav2_mono"})
+                json.dumps({"low_quality": True, "source": source_tag})
             )
             written.append(depth_path)
     return written
 
 
-def _run_dav2(model, rgb: np.ndarray, cfg: DepthConfig) -> np.ndarray:  # pragma: no cover
-    """Batched fp16 DAv2 inference."""
-    import torch
+def _run_dav3(model, rgb: np.ndarray, cfg: DepthConfig) -> np.ndarray:  # pragma: no cover
+    """Batched DA3 monocular inference.
+
+    DA3 exposes a high-level ``inference()`` method that batches internally
+    and returns a ``Prediction`` object. The depth is metric (meters); we
+    clip and convert to uint16 mm.
+    """
+    import cv2  # type: ignore
 
     T, H, W, _ = rgb.shape
     out = np.zeros((T, *cfg.target_hw), dtype=np.uint16)
+    target_h, target_w = cfg.target_hw
     for start in range(0, T, cfg.batch_size):
         end = min(start + cfg.batch_size, T)
-        x = torch.as_tensor(rgb[start:end]).permute(0, 3, 1, 2).contiguous().float() / 255.0
-        with torch.cuda.amp.autocast(enabled=cfg.fp16):
-            rel_depth = model(x.cuda())
-        rel = rel_depth.detach().cpu().numpy()
-        rel_norm = (rel - rel.min()) / max(1e-6, (rel.max() - rel.min()))
-        depth_mm = (rel_norm * cfg.max_range_mm).clip(0, np.iinfo(np.uint16).max)
-        out[start:end] = depth_mm.astype(np.uint16)
+        # DA3's inference() accepts a list of np.ndarray HxWx3 RGB uint8 images.
+        imgs = [rgb[i] for i in range(start, end)]
+        prediction = model.inference(
+            imgs,
+            process_res=cfg.process_res,
+            process_res_method="upper_bound_resize",
+            export_dir=None,
+        )
+        depth_m = np.asarray(prediction.depth)  # [N, H', W'] float meters
+        # Resize each frame to target_hw, clip to range, convert to uint16 mm.
+        for k in range(depth_m.shape[0]):
+            dm = depth_m[k]
+            if dm.shape != (target_h, target_w):
+                dm = cv2.resize(dm.astype(np.float32), (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+            depth_mm = np.clip(dm * 1000.0, 0, cfg.max_range_mm).clip(0, np.iinfo(np.uint16).max)
+            out[start + k] = depth_mm.astype(np.uint16)
     return out
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    """``python -m prep.stage_2c_compute_depth --dataset droid --chunk 0``.
+
+    The CLI is a thin wrapper over :func:`compute_depth_for_chunk`. The
+    ``--dataset`` flag selects the source name used to build paths (one
+    A100 node per dataset, per Wave F).
+    """
+    import argparse
+    import os as _os
+
+    parser = argparse.ArgumentParser(
+        prog="prep.stage_2c_compute_depth", description=__doc__
+    )
+    scratch_default = Path(_os.environ.get("USAM_SCRATCH", "/scratch/usam"))
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument(
+        "--dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="Source name (one A100 node per dataset).",
+    )
+    ds.add_argument(
+        "--source",
+        dest="dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="(deprecated) use --dataset",
+    )
+    parser.add_argument("--chunk", required=True, type=int)
+    parser.add_argument(
+        "--staged-root",
+        type=Path,
+        default=scratch_default / "staged",
+        help="Root containing <dataset>/chunk-NNN/ep_*/ directories.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=scratch_default / "depth",
+        help="Root where per-episode depth files are written.",
+    )
+    parser.add_argument(
+        "--cameras",
+        nargs="+",
+        default=["head_rgb"],
+        help="Canonical camera keys to process.",
+    )
+    parser.add_argument(
+        "--dav3-ckpt",
+        type=str,
+        default="depth-anything/DA3MONO-LARGE",
+        help="HF model id or local path for the DA3 checkpoint "
+        "(default: depth-anything/DA3MONO-LARGE). Pass an empty string to "
+        "skip model load (placeholder/smoke mode).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Accepted for parity; depth precompute is always per-episode idempotent.",
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO)
+
+    chunk_dir = args.staged_root / args.dataset / f"chunk-{args.chunk:03d}"
+    ckpt = args.dav3_ckpt if args.dav3_ckpt else None
+    compute_depth_for_chunk(
+        staged_chunk_dir=chunk_dir,
+        output_dir=args.output_root / args.dataset / f"chunk-{args.chunk:03d}",
+        cameras=args.cameras,
+        dav3_ckpt=ckpt,
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    sys.exit(main())
 
 
 __all__ = ["DepthConfig", "compute_depth_for_chunk"]

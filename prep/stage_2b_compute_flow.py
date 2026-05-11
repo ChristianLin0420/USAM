@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: MIT
-"""Stage 2b: SEA-RAFT optical-flow precompute (DROID-only Phase 1 path).
+"""Stage 2b: SEA-RAFT optical-flow precompute.
 
 Reads a chunk's worth of staged RGB frames produced by stage 2a, runs SEA-RAFT
 in fp16 batches, and writes ``flow_{cam}.npy`` (HSV-encoded) plus an HSV-h264
-``.mp4`` for downstream visualization. Phase 2 will fan this out to the other
-five sources.
+``.mp4`` for downstream visualization.
 
 This module exposes a tiny ``compute_flow_for_chunk`` API that the dispatcher
 wraps in a ``CheckpointedJob`` instance. We do not subclass ``CheckpointedJob``
 here because flow precompute is per-camera-per-chunk rather than per-episode.
+
+Model
+-----
+Default checkpoint is ``princeton-vl/SEA-RAFT-L`` (Large variant). The shim at
+``/opt/searaft/sea_raft/api.py`` (baked into the prep Docker image) wraps the
+upstream ``RAFT`` class with ``PyTorchModelHubMixin``-style loading.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Union
 
 import numpy as np
 
@@ -62,12 +67,21 @@ def _flow_to_hsv(flow_uv: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
 
-def _load_searaft(ckpt_path: Path):
-    """Load a frozen SEA-RAFT checkpoint. Lazy import."""
+def _load_searaft(ckpt: Optional[Union[str, Path]]):
+    """Load a frozen SEA-RAFT checkpoint. Lazy import.
+
+    Parameters
+    ----------
+    ckpt : str | Path | None
+        Either an HF Hub model id (e.g. ``"princeton-vl/SEA-RAFT-L"``) or a
+        path to a local ``.pth`` file. ``None`` returns ``None``.
+    """
+    if ckpt is None:
+        return None
     try:
         from sea_raft.api import load_searaft  # type: ignore
 
-        return load_searaft(str(ckpt_path))
+        return load_searaft(str(ckpt))
     except ImportError as e:  # pragma: no cover - only hit at real runtime
         raise RuntimeError(
             "SEA-RAFT is required for stage_2b_compute_flow at runtime "
@@ -79,7 +93,7 @@ def compute_flow_for_chunk(
     staged_chunk_dir: Path,
     output_dir: Path,
     cameras: Iterable[str],
-    searaft_ckpt: Optional[Path] = None,
+    searaft_ckpt: Optional[Union[str, Path]] = "princeton-vl/SEA-RAFT-L",
     config: FlowConfig | None = None,
 ) -> List[Path]:
     """Compute per-camera flow for one chunk's worth of episodes.
@@ -92,9 +106,9 @@ def compute_flow_for_chunk(
         ``flow_<cam>.npy`` and an HSV mp4 are written to ``ep_*/`` here.
     cameras : iterable of str
         Canonical camera keys to process (e.g. ``["head_rgb", "wrist_rgb"]``).
-    searaft_ckpt : Path | None
-        Path to the SEA-RAFT checkpoint. If ``None`` we look for one at
-        ``$USAM_SEARAFT_CKPT`` in the runtime env.
+    searaft_ckpt : str | Path | None
+        HF Hub model id (default ``"princeton-vl/SEA-RAFT-L"``) or a path to a
+        local checkpoint. ``None`` bypasses model load (smoke-test path).
     config : FlowConfig | None
 
     Returns
@@ -137,7 +151,12 @@ def compute_flow_for_chunk(
 
 
 def _run_searaft(model, rgb: np.ndarray, cfg: FlowConfig) -> np.ndarray:  # pragma: no cover
-    """Batched fp16 SEA-RAFT inference. Real-runtime only."""
+    """Batched fp16 SEA-RAFT inference. Real-runtime only.
+
+    SEA-RAFT's ``forward`` returns a dict (``flow``, ``info``) where each entry
+    is a list of refinement-step tensors; we take the last entry (final
+    refinement) per RAFT convention.
+    """
     import torch
 
     T = rgb.shape[0]
@@ -147,10 +166,97 @@ def _run_searaft(model, rgb: np.ndarray, cfg: FlowConfig) -> np.ndarray:  # prag
         a = torch.as_tensor(rgb[start:end]).permute(0, 3, 1, 2).contiguous().float() / 255.0
         b = torch.as_tensor(rgb[start + 1 : end + 1]).permute(0, 3, 1, 2).contiguous().float() / 255.0
         with torch.cuda.amp.autocast(enabled=cfg.fp16):
-            flow_pred = model(a.cuda(), b.cuda(), iters=cfg.iters)
+            output = model(a.cuda(), b.cuda(), iters=cfg.iters, test_mode=True)
+        # SEA-RAFT returns a dict with `flow` being a list of refinement steps.
+        if isinstance(output, dict) and "flow" in output:
+            flow_pred = output["flow"][-1] if isinstance(output["flow"], (list, tuple)) else output["flow"]
+        else:
+            flow_pred = output
         flow_np = flow_pred.detach().cpu().permute(0, 2, 3, 1).numpy()
         out[start:end] = flow_np.astype(np.float16)
     return out
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    """``python -m prep.stage_2b_compute_flow --dataset droid --chunk 0``.
+
+    The CLI is a thin wrapper over :func:`compute_flow_for_chunk`. The
+    ``--dataset`` flag selects the source name used to build paths (one
+    A100 node per dataset, per Wave F).
+    """
+    import argparse
+    import os as _os
+
+    parser = argparse.ArgumentParser(
+        prog="prep.stage_2b_compute_flow", description=__doc__
+    )
+    scratch_default = Path(_os.environ.get("USAM_SCRATCH", "/scratch/usam"))
+    # Either --dataset or --source must be supplied (--source is deprecated).
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument(
+        "--dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="Source name (one A100 node per dataset).",
+    )
+    ds.add_argument(
+        "--source",
+        dest="dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="(deprecated) use --dataset",
+    )
+    parser.add_argument("--chunk", required=True, type=int)
+    parser.add_argument(
+        "--staged-root",
+        type=Path,
+        default=scratch_default / "staged",
+        help="Root containing <dataset>/chunk-NNN/ep_*/ directories.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=scratch_default / "flow",
+        help="Root where per-episode flow files are written.",
+    )
+    parser.add_argument(
+        "--cameras",
+        nargs="+",
+        default=["head_rgb"],
+        help="Canonical camera keys to process.",
+    )
+    parser.add_argument(
+        "--searaft-ckpt",
+        type=str,
+        default="princeton-vl/SEA-RAFT-L",
+        help="HF model id or local path for the SEA-RAFT checkpoint "
+        "(default: princeton-vl/SEA-RAFT-L). Pass an empty string to skip "
+        "model load (placeholder/smoke mode).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Accepted for parity; flow precompute is always per-episode idempotent.",
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO)
+
+    chunk_dir = args.staged_root / args.dataset / f"chunk-{args.chunk:03d}"
+    ckpt = args.searaft_ckpt if args.searaft_ckpt else None
+    compute_flow_for_chunk(
+        staged_chunk_dir=chunk_dir,
+        output_dir=args.output_root / args.dataset / f"chunk-{args.chunk:03d}",
+        cameras=args.cameras,
+        searaft_ckpt=ckpt,
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    sys.exit(main())
 
 
 __all__ = ["FlowConfig", "compute_flow_for_chunk"]
