@@ -145,6 +145,132 @@ The smoke run writes checkpoints + logs under
 
 ---
 
+## 6.5 Real-data pipeline + 8-GPU smoke train (Waves F–J)
+
+§6 above exercises the synthetic-fixture smoke train. For a **real-data
+end-to-end validation** — DROID download → SEA-RAFT flow → DA3
+depth → DINOv3 cache → 2000-step train on 8 GPUs with wandb — use this
+section.
+
+### 6.5.1 Build the prep image once
+
+```bash
+# Set HF_TOKEN (with access to facebook/dinov3-vitl16-pretrain-lvd1689m
+# and depth-anything/DA3MONO-LARGE).
+printf '%s' "$HF_TOKEN" > ~/.hf_token && chmod 600 ~/.hf_token
+
+DOCKER_BUILDKIT=1 docker build \
+    --secret id=hf_token,src=$HOME/.hf_token \
+    -f docker/Dockerfile.prep_a100 \
+    -t usam:prep-a100 .
+```
+
+The bake takes ~10–15 min on first build. It pre-downloads the
+gated DINOv3 weights, the SEA-RAFT-M (Tartan-Spring) checkpoint, and
+the DA3MONO-LARGE checkpoint into the image so Slurm nodes never need
+HF credentials. See [`docker/README.md`](../docker/README.md).
+
+### 6.5.2 Run the head-only prep pipeline
+
+Head-only (egocentric) per the LDA-1B convention. The runner builds
+the LeRobot v2.1 layout from the prep outputs.
+
+```bash
+docker run --rm --shm-size=8g --gpus all \
+  -v /path/to/USAM:/workspace/USAM \
+  -v /path/to/scratch:/workspace/output \
+  -v /tmp/run_pipeline_head_only.py:/tmp/runner.py:ro \
+  -e USAM_EPISODES_PER_CHUNK=2 -e TF_CPP_MIN_LOG_LEVEL=3 \
+  -w /workspace/USAM usam:prep-a100 \
+  bash -c 'pip install -q gcsfs tensorflow-cpu; python /tmp/runner.py'
+```
+
+Runs stages **2a (DROID → LeRobot)**, **2b (SEA-RAFT-M flow)**,
+**2c (DA3MONO depth)**, **4 (DINOv3 ViT-L/16 cache, 8-GPU)**. Two-episode
+chunk completes in ~3 min and writes ~340 MB.
+
+`USAM_EPISODES_PER_CHUNK` overrides the default chunk size (256 episodes
+for production). For a longer smoke, raise to 10–20.
+
+### 6.5.3 Inspect feature quality (Wave I)
+
+```bash
+docker run --rm --gpus '"device=0"' \
+  -v /path/to/USAM:/workspace/USAM \
+  -v /path/to/scratch:/workspace/output \
+  -w /workspace/USAM usam:prep-a100 \
+  python tools/viz/dinov3_pca_gallery.py
+```
+
+Open `/path/to/scratch/viz/dinov3_chunk0/index.html` in a browser. For
+each of N frames per (episode, camera) you get a 4-column side-by-side:
+
+* **RGB** (the original 448×448 frame)
+* **DINOv3 PCA** (1024-D patch tokens projected to 3 channels, 28×28 grid)
+* **Depth** (DA3MONO-LARGE metric mm, viridis colormap)
+* **Flow** (SEA-RAFT, HSV-encoded)
+
+If the DINOv3 PCA panel shows coherent color regions around objects /
+gripper / table edges, the encoder is producing semantically meaningful
+features.
+
+### 6.5.4 8-GPU smoke train with wandb (Wave J)
+
+```bash
+# One-time wandb credential file
+printf '%s' "$WANDB_API_KEY" > ~/.wandb_key && chmod 600 ~/.wandb_key
+
+docker run --rm --shm-size=16g --gpus all \
+  -v /path/to/USAM:/workspace/USAM \
+  -v /path/to/scratch:/workspace/output \
+  -v $HOME/.wandb_key:/tmp/wandb_key:ro \
+  -e WANDB_PROJECT=usam \
+  -e USAM_VIZ_INTERVAL=50      `# logs DINOv3 PCA media every 50 steps` \
+  -e USAM_MAX_STEPS=2000 \
+  -e USAM_RAMP_STEPS=500       `# aux-head ramp shortened for the smoke` \
+  -e USAM_NO_DDP=1             `# each rank trains its own copy; rank 0 logs` \
+  -w /workspace/USAM usam:prep-a100 \
+  bash -c '
+    pip install -q wandb
+    export WANDB_API_KEY="$(cat /tmp/wandb_key)"
+    torchrun --standalone --nproc-per-node=8 tools/train/smoke_train_long.py
+  '
+```
+
+Each rank runs on its own GPU (`USAM_NO_DDP=1` — no grad sync), seeds
+are identical so all ranks compute the same updates. Total wall ~4 min.
+Only rank 0 prints + writes to wandb.
+
+For an **H200 production run**, raise `USAM_VIZ_INTERVAL` to 1000–5000
+so media uploads don't compete with the long-run throughput.
+
+### 6.5.5 What "good pretraining" looks like in wandb
+
+Open the dashboard URL printed at the end of the run (e.g.
+`https://wandb.ai/<entity>/usam/runs/<id>`). Healthy signs:
+
+| Metric | Good | Bad |
+|---|---|---|
+| `loss/total` | decreasing curve through step 100 then exponential decay | flat or NaN |
+| `loss/{action,rgb,depth,flow}` | all 4 decrease together | only `action` decreases (other heads not learning) |
+| `grad/player` | non-zero throughout (~0.5–2 typical) | flatlines at 0 (Player not training) |
+| `grad/encoder` | non-zero if LoRA wrappers caught the q_proj/k_proj/v_proj modules | flatlines at 0 (audit needed — see Wave A LoRA target-name policy) |
+| `plan_cache/pairwise_cos` | near 0 (diverse plans) | rising toward 1 (Conductor collapse) |
+| `plan_cache/emb_norm_mean` | stable | crashing toward 0 (cache death) |
+| `data/{action_std,proprio_std,rgb_dino_std}` | non-zero, stable | falling to 0 (degenerate batches) |
+| `weight/{geom,flow_act}` | ramping 0 → target over USAM_RAMP_STEPS | flat at 0 (ramp disabled) |
+| `viz/dinov3_pca` (media) | semantic regions in patch PCA become more structured over time | uniform noise throughout |
+| `step_time_ms` | stable after warmup (no slow drift up) | ramps up (memory leak risk) |
+
+### 6.5.6 Sample wandb run (current main HEAD)
+
+* 2000 steps on real DROID chunk 0 (2 episodes, head-only)
+* Loss 96.5 → 1.5 (~60× reduction)
+* All 12+ scalar diagnostics + 41 `viz/dinov3_pca` media items
+* Run: <https://wandb.ai/crlc112358/usam/runs/6f8hc151>
+
+---
+
 ## 7. Eval on a smoke checkpoint
 
 The full LIBERO closed-loop evaluation runs on T2/T3; on T0 you can

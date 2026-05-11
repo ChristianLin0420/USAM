@@ -21,6 +21,7 @@ under `usam/` and `prep/`; `lda/` is touched only minimally.
 | Understand each module's API | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) |
 | Understand the data layout on the Hub | [`docs/DATA_FORMAT.md`](docs/DATA_FORMAT.md) |
 | Set up an 8xA40 dev box (T0) | [`docs/HOWTO_LOCAL_8A40.md`](docs/HOWTO_LOCAL_8A40.md) |
+| **Real-data pipeline + 8-GPU smoke train + wandb** | [`docs/HOWTO_LOCAL_8A40.md §6.5`](docs/HOWTO_LOCAL_8A40.md) |
 | Run Phase A prep on Slurm A100 (T1) | [`docs/HOWTO_SLURM_A100.md`](docs/HOWTO_SLURM_A100.md) |
 | Submit the H200 burst (T2) | [`docs/HOWTO_H200.md`](docs/HOWTO_H200.md) |
 | Pick the right Docker image | [`docker/README.md`](docker/README.md) |

@@ -109,15 +109,21 @@ def _maybe_init_dist() -> None:
 
 
 def main() -> int:
+    # Rank-0-only logging. Non-rank-0 ranks bump their root logger to
+    # WARNING so the per-step `logger.info("step=%d ...")` lines from
+    # usam.train don't fan out 8x. wandb and checkpoints are already
+    # rank-0-gated; this just keeps stdout legible.
+    is_rank0 = _is_rank_zero()
     logging.basicConfig(
-        level=logging.INFO,
+        level=logging.INFO if is_rank0 else logging.WARNING,
         format=f"%(asctime)s [rank {os.environ.get('RANK', '0')}] %(levelname)s %(message)s",
     )
     warnings.filterwarnings("ignore")
 
-    print(f"RANK={os.environ.get('RANK', '0')} "
-          f"LOCAL_RANK={os.environ.get('LOCAL_RANK', '0')} "
-          f"WORLD_SIZE={os.environ.get('WORLD_SIZE', '1')}", flush=True)
+    if is_rank0:
+        print(f"RANK=0 (only) "
+              f"LOCAL_RANK={os.environ.get('LOCAL_RANK', '0')} "
+              f"WORLD_SIZE={os.environ.get('WORLD_SIZE', '1')}", flush=True)
 
     _maybe_init_dist()
 
