@@ -30,6 +30,10 @@ safetensors
 
 # --- RLDS readers (DROID, Bridge, OXE-AugE) ---
 tensorflow-datasets
+# TFDS calls tf.data.Dataset under the hood; the DROID converter also
+# uses tf-native ops in `_tf_episode_to_result` (steps.as_numpy_iterator).
+# CPU TF is enough — data conversion happens before any GPU work.
+tensorflow-cpu
 # Google Cloud Storage filesystem driver (TFDS uses it to read gs:// URIs
 # like the public DROID bucket at gs://gresearch/robotics).
 gcsfs
