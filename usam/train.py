@@ -383,6 +383,125 @@ def _data_iter_forever(loader: DataLoader) -> Iterator[Dict[str, Any]]:
             yield batch
 
 
+_PARAM_GROUPS = (
+    ("encoder", ("encoder.", "tri_dino.", "dinov3.")),
+    ("player", ("player.",)),
+    ("aux", ("aux.", "geom_loss.", "flow_act_loss.")),
+    ("drift", ("drift_mlp.",)),
+    ("subtask", ("subtask_head.",)),
+)
+
+
+def _param_group_grad_norms(model: torch.nn.Module) -> Dict[str, float]:
+    """Pre-clip per-param-group L2 grad norm. Cheap (one pass over params)."""
+    sums: Dict[str, float] = {g: 0.0 for g, _ in _PARAM_GROUPS}
+    other = 0.0
+    for name, p in model.named_parameters():
+        if p.grad is None or not p.requires_grad:
+            continue
+        sq = float(p.grad.detach().pow(2).sum().item())
+        for g, prefixes in _PARAM_GROUPS:
+            if any(name.startswith(prefix) for prefix in prefixes):
+                sums[g] += sq
+                break
+        else:
+            other += sq
+    out = {g: math.sqrt(v) for g, v in sums.items()}
+    out["other"] = math.sqrt(other)
+    return out
+
+
+def _plan_cache_stats(model: torch.nn.Module) -> Dict[str, float]:
+    """Conductor cache health: norm + pairwise-cos of committed embeddings.
+
+    Soft-fails if the model has no ``plan_cache`` attribute (e.g., a
+    test stub) or the cache is empty.
+    """
+    cache = getattr(model, "plan_cache", None)
+    if cache is None:
+        return {}
+    emb = getattr(cache, "committed_emb", None)
+    if emb is None or not isinstance(emb, torch.Tensor) or emb.numel() == 0:
+        return {}
+    emb = emb.detach().float()
+    if emb.dim() == 1:
+        emb = emb.unsqueeze(0)
+    norms = emb.norm(dim=-1)
+    out = {"plan_cache/emb_norm_mean": float(norms.mean().item())}
+    if emb.shape[0] >= 2:
+        e = emb / norms.unsqueeze(-1).clamp(min=1e-8)
+        cos = (e @ e.T)
+        # Pairwise cos excluding the diagonal.
+        n = cos.shape[0]
+        mask = ~torch.eye(n, dtype=torch.bool, device=cos.device)
+        out["plan_cache/pairwise_cos"] = float(cos[mask].mean().item())
+    return out
+
+
+def _batch_stats(batch: Dict[str, Any]) -> Dict[str, float]:
+    """Per-batch variance of action / proprio / rgb-DINO. Catches degenerate batches."""
+    out: Dict[str, float] = {}
+    for key, name in (
+        ("action_chunk", "data/action_std"),
+        ("proprio", "data/proprio_std"),
+        ("rgb_dino_seq", "data/rgb_dino_std"),
+    ):
+        v = batch.get(key)
+        if isinstance(v, torch.Tensor) and v.numel() > 1:
+            out[name] = float(v.detach().float().std().item())
+    return out
+
+
+def _ramp_fractions(step: int, ramp_steps: int) -> Dict[str, float]:
+    """Linear-ramp progress for the geom + flow_act aux heads, in [0, 1]."""
+    if ramp_steps <= 0:
+        frac = 1.0
+    elif step <= 0:
+        frac = 0.0
+    elif step >= ramp_steps:
+        frac = 1.0
+    else:
+        frac = float(step) / float(ramp_steps)
+    return {"ramp/geom_frac": frac, "ramp/flow_act_frac": frac}
+
+
+def _summary_stats(losses: List[float]) -> Dict[str, float]:
+    """Run-end summary for wandb. min, last-50 mean, total wall."""
+    if not losses:
+        return {}
+    last_n = min(50, len(losses))
+    return {
+        "summary/best_total_loss": float(min(losses)),
+        "summary/mean_last_50": float(sum(losses[-last_n:]) / last_n),
+        "summary/final_total_loss": float(losses[-1]),
+        "summary/n_steps": len(losses),
+    }
+
+
+def _pca_panel(rgb_uint8: "np.ndarray", patch_tokens: torch.Tensor) -> "np.ndarray":
+    """RGB [H,W,3] uint8 + patch tokens [N,D] -> side-by-side [H, 2W, 3] uint8.
+
+    PCA -> 3 channels, reshape to sqrt(N) x sqrt(N), upscale to H x W
+    (nearest), concatenate next to the original RGB. Used for the
+    every-N-steps ``viz/dinov3_pca`` wandb image artifact.
+    """
+    import numpy as np  # noqa: F401 — local to keep module load cheap
+    import cv2          # noqa: F401
+
+    feats = patch_tokens.detach().float()
+    feats = feats - feats.mean(dim=0, keepdim=True)
+    _u, _s, v = torch.svd_lowrank(feats, q=3)
+    pca = feats @ v
+    pca = pca - pca.amin(dim=0, keepdim=True)
+    pca = pca / pca.amax(dim=0, keepdim=True).clamp(min=1e-6)
+    grid = int(pca.shape[0] ** 0.5)
+    pca = pca.reshape(grid, grid, 3)
+    pca_np = (pca * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+    H, W = rgb_uint8.shape[:2]
+    pca_up = cv2.resize(pca_np, (W, H), interpolation=cv2.INTER_NEAREST)
+    return np.concatenate([rgb_uint8, pca_up], axis=1)
+
+
 def train_loop(
     model: USAMTrainModel,
     optimizer: torch.optim.Optimizer,
@@ -478,6 +597,39 @@ def train_loop(
                 log_payload[f"weight/{k}"] = float(v)
             if grad_norm is not None:
                 log_payload["grad_norm"] = float(grad_norm.detach().item())
+            # Diagnostic scalars (cheap; every step).
+            log_payload.update(_ramp_fractions(step, ramp_steps))
+            log_payload.update(
+                {f"grad/{g}": v for g, v in _param_group_grad_norms(model).items()}
+            )
+            log_payload.update(_plan_cache_stats(model))
+            log_payload.update(_batch_stats(batch))
+            # Periodic media (expensive; gated by USAM_VIZ_INTERVAL, default 100).
+            viz_interval = int(os.environ.get("USAM_VIZ_INTERVAL", "100"))
+            if viz_interval > 0 and (step == 0 or (step + 1) % viz_interval == 0):
+                try:
+                    import wandb as _wandb
+                    import numpy as _np
+                    # rgb_dino_seq is [B, T, N, D] feature tensor — we don't
+                    # have the raw RGB pixels here, but we DO have the
+                    # [CLS] + patch features, which is what we'd PCA anyway.
+                    rgb_seq = batch.get("rgb_dino_seq")
+                    if isinstance(rgb_seq, torch.Tensor) and rgb_seq.dim() == 4:
+                        # Take batch element 0, last timestep, patch tokens
+                        # (drop the [CLS] at position 0).
+                        feats = rgb_seq[0, -1, 1:, :]  # [N-1, D]
+                        # Reuse the encoder PCA helper with a black placeholder
+                        # RGB so we get a panel of just the PCA visualization.
+                        n = feats.shape[0]
+                        side = int(n ** 0.5)
+                        if side * side == n:
+                            placeholder = _np.zeros((side * 16, side * 16, 3), dtype=_np.uint8)
+                            panel = _pca_panel(placeholder, feats)
+                            log_payload["viz/dinov3_pca"] = _wandb.Image(
+                                panel, caption=f"step={step} (placeholder RGB | DINOv3 PCA)"
+                            )
+                except Exception as e:  # pragma: no cover
+                    logger.debug("media log skipped at step %d: %s", step, e)
             try:
                 wandb_run.log(log_payload, step=step)
             except Exception as e:  # pragma: no cover
@@ -485,6 +637,14 @@ def train_loop(
 
         if ckpt is not None:
             ckpt.maybe_save(step, model, optimizer, scheduler, val_loss=None)
+
+    # Run-end summary (visible in the wandb run's Summary panel).
+    if wandb_run is not None:
+        try:
+            for k, v in _summary_stats(losses).items():
+                wandb_run.summary[k] = v
+        except Exception as e:  # pragma: no cover
+            logger.warning("wandb summary write failed (continuing): %s", e)
 
     return losses
 
