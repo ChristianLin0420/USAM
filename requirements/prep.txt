@@ -30,3 +30,6 @@ safetensors
 
 # --- RLDS readers (DROID, Bridge, OXE-AugE) ---
 tensorflow-datasets
+# Google Cloud Storage filesystem driver (TFDS uses it to read gs:// URIs
+# like the public DROID bucket at gs://gresearch/robotics).
+gcsfs
