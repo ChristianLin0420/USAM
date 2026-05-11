@@ -77,11 +77,62 @@ __all__ = [
     "ConversionResult",
     "CheckpointedJob",
     "PREEMPT_EXIT_CODE",
+    "EPISODES_PER_CHUNK",
+    "shard_assignment",
 ]
 
 # Slurm wrapper interprets 124 as "please requeue". This constant is
 # referenced by ``slurm/job.sbatch`` — do not change without updating both.
 PREEMPT_EXIT_CODE: int = 124
+
+# Default per-chunk episode count for the Slurm pipeline. One chunk targets
+# a single A100 node's ~4 h preemptible window. Override via the
+# ``USAM_EPISODES_PER_CHUNK`` env var for smoke-test runs that want fewer
+# episodes for fast iteration.
+EPISODES_PER_CHUNK: int = 256
+
+
+def shard_assignment(
+    n_total: int,
+    chunk: int,
+    episodes_per_chunk: int | None = None,
+) -> list[int]:
+    """Return the episode indices belonging to a given chunk.
+
+    Partitions ``range(n_total)`` into contiguous chunks of size
+    ``episodes_per_chunk`` (default :data:`EPISODES_PER_CHUNK`, overridable
+    via the ``USAM_EPISODES_PER_CHUNK`` env var for smoke tests). Chunk
+    ``N`` gets indices ``[N*size, (N+1)*size)`` clipped to ``n_total``. If
+    ``N*size >= n_total`` the result is empty.
+
+    Parameters
+    ----------
+    n_total : int
+        Total number of source episodes (e.g. DROID's
+        ``builder.info.splits["train"].num_examples``).
+    chunk : int
+        Chunk index, 0-based.
+    episodes_per_chunk : int | None
+        Override the default chunk size. If None, reads
+        ``USAM_EPISODES_PER_CHUNK`` from the env (else falls back to
+        :data:`EPISODES_PER_CHUNK`).
+    """
+    import os as _os
+
+    if episodes_per_chunk is None:
+        episodes_per_chunk = int(
+            _os.environ.get("USAM_EPISODES_PER_CHUNK", str(EPISODES_PER_CHUNK))
+        )
+    assert chunk >= 0, f"chunk must be non-negative, got {chunk}"
+    assert episodes_per_chunk > 0, (
+        f"episodes_per_chunk must be positive, got {episodes_per_chunk}"
+    )
+    start = chunk * episodes_per_chunk
+    if start >= n_total:
+        return []
+    end = min(start + episodes_per_chunk, n_total)
+    return list(range(start, end))
+
 
 logger = logging.getLogger(__name__)
 
