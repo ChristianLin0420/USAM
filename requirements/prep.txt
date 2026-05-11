@@ -28,6 +28,13 @@ huggingface-hub[hf_xet,cli]
 hf_transfer
 safetensors
 
+# --- experiment tracking (used by usam.train + usam.finetune_libero) ---
+# Soft-fails if WANDB_API_KEY is unset; we still install the package
+# here so the CLI's `import wandb` succeeds and the train loop can
+# wire up the run when a key is present.
+wandb
+torchmetrics
+
 # --- RLDS readers (DROID, Bridge, OXE-AugE) ---
 tensorflow-datasets
 # TFDS calls tf.data.Dataset under the hood; the DROID converter also

@@ -399,17 +399,27 @@ def train_loop(
     log_every: int = 10,
     ramp_steps: int = 50_000,
     grad_clip: float = 1.0,
+    wandb_run: Any = None,
 ) -> List[float]:
     """Run the training loop. Returns the list of per-step total losses.
 
     The cache-dropout call lives inside :meth:`USAMTrainModel.training_step`.
     See the module docstring for the contract.
+
+    Parameters
+    ----------
+    wandb_run : wandb.sdk.wandb_run.Run | None
+        If non-None, every step is logged to wandb under namespaced keys
+        (``loss/total``, ``loss/<component>``, ``lr``, ``step_time_ms``,
+        ``grad_norm``). Use :func:`_maybe_init_wandb` to construct one
+        from the ``WANDB_API_KEY`` env var.
     """
     model.train()
     losses: List[float] = []
     data_iter = _data_iter_forever(dataloader)
 
     for step in range(max_steps):
+        step_t0 = time.time()
         batch = next(data_iter)
         # Move tensor batch entries to the device.
         batch = _to_device(batch, device, weights_dtype)
@@ -434,8 +444,9 @@ def train_loop(
             raise RuntimeError(f"Non-finite loss at step {step}: {total_loss.item()}")
 
         total_loss.backward()
+        grad_norm = None
         if grad_clip is not None and grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(
+            grad_norm = torch.nn.utils.clip_grad_norm_(
                 [p for p in model.parameters() if p.requires_grad and p.grad is not None],
                 grad_clip,
             )
@@ -444,18 +455,93 @@ def train_loop(
 
         loss_val = float(total_loss.detach().item())
         losses.append(loss_val)
+        step_time_ms = (time.time() - step_t0) * 1000.0
+        cur_lr = scheduler.get_last_lr()[0]
 
         if (step % log_every == 0) or (step == max_steps - 1):
             per_str = " ".join(
                 f"{k}={float(v.detach().item()):.4f}" for k, v in per_loss.items()
             )
             logger.info("step=%d loss=%.4f lr=%.3e %s",
-                        step, loss_val, scheduler.get_last_lr()[0], per_str)
+                        step, loss_val, cur_lr, per_str)
+
+        # ---- wandb (soft) ----
+        if wandb_run is not None:
+            log_payload: Dict[str, Any] = {
+                "loss/total": loss_val,
+                "lr": cur_lr,
+                "step_time_ms": step_time_ms,
+            }
+            for k, v in per_loss.items():
+                log_payload[f"loss/{k}"] = float(v.detach().item())
+            for k, v in weights.as_dict().items():
+                log_payload[f"weight/{k}"] = float(v)
+            if grad_norm is not None:
+                log_payload["grad_norm"] = float(grad_norm.detach().item())
+            try:
+                wandb_run.log(log_payload, step=step)
+            except Exception as e:  # pragma: no cover
+                logger.warning("wandb.log failed at step %d (continuing): %s", step, e)
 
         if ckpt is not None:
             ckpt.maybe_save(step, model, optimizer, scheduler, val_loss=None)
 
     return losses
+
+
+def _maybe_init_wandb(
+    run_meta: "RunMetadata",
+    train_cfg: Dict[str, Any],
+    model_cfg: Dict[str, Any],
+    args: TrainArgs,
+) -> Any:
+    """Initialize wandb if ``WANDB_API_KEY`` is set; otherwise return ``None``.
+
+    Soft-fails on every error path so a missing API key or a transient
+    network glitch never blocks training. The returned object (or
+    ``None``) is passed into :func:`train_loop` as the ``wandb_run``
+    kwarg, where it gates the per-step ``wandb.log`` call.
+
+    Honored env vars:
+      * ``WANDB_API_KEY``  — credentials. Without it, this returns None.
+      * ``WANDB_PROJECT``  — project name. Defaults to ``"usam"``.
+      * ``WANDB_ENTITY``   — team/user. Defaults to wandb's own default.
+      * ``WANDB_MODE``     — ``"online"`` / ``"offline"`` / ``"disabled"``.
+    """
+    if not os.environ.get("WANDB_API_KEY"):
+        logger.info("WANDB_API_KEY not set; skipping wandb init (stdout logging only)")
+        return None
+    try:
+        import wandb  # type: ignore
+    except ImportError:
+        logger.warning("wandb not installed; skipping wandb init")
+        return None
+    try:
+        run = wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "usam"),
+            entity=os.environ.get("WANDB_ENTITY"),
+            name=run_meta.run_id,
+            config={
+                "train_cfg": train_cfg,
+                "model_cfg": model_cfg,
+                "cli_args": {
+                    "max_steps": args.max_steps,
+                    "device": args.device,
+                    "seed": args.seed,
+                    "config": str(args.config),
+                    "model_config": str(args.model_config) if args.model_config else None,
+                    "data": str(args.data) if args.data else None,
+                    "output_dir": str(args.output_dir),
+                },
+                "git_sha": run_meta.git_sha,
+            },
+            settings=wandb.Settings(start_method="fork"),
+        )
+        logger.info("wandb run: %s (%s)", run.name, run.url)
+        return run
+    except Exception as e:  # pragma: no cover
+        logger.warning("wandb init failed (continuing without wandb): %s", e)
+        return None
 
 
 def _to_device(batch: Dict[str, Any], device: torch.device, dtype: torch.dtype) -> Dict[str, Any]:
@@ -549,6 +635,13 @@ def run(
                 run_meta.run_id, run_meta.git_sha, args.output_dir)
 
     # ------------------------------------------------------------------
+    # Optional wandb. Soft-fails if WANDB_API_KEY is unset or wandb is
+    # not installed; in that case training proceeds with stdout-only
+    # logging via the loguru/standard logger above.
+    # ------------------------------------------------------------------
+    wandb_run = _maybe_init_wandb(run_meta, train_cfg, model_cfg, args)
+
+    # ------------------------------------------------------------------
     # Train. Auto-OOM-reduce: catch the first OOM, halve batch, retry.
     # ------------------------------------------------------------------
     try:
@@ -566,6 +659,7 @@ def run(
             ckpt=ckpt,
             log_every=args.log_every,
             ramp_steps=ramp_steps,
+            wandb_run=wandb_run,
         )
     except torch.cuda.OutOfMemoryError as e:  # pragma: no cover - GPU-only
         if not args.auto_oom_reduce:
@@ -589,7 +683,14 @@ def run(
             ckpt=ckpt,
             log_every=args.log_every,
             ramp_steps=ramp_steps,
+            wandb_run=wandb_run,
         )
+    finally:
+        if wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception:  # pragma: no cover
+                pass
 
 
 def main(argv: Optional[List[str]] = None) -> List[float]:
