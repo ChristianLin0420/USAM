@@ -108,13 +108,16 @@ class DroidConverter(CheckpointedJob):
         karlp_droid_root: Optional[Path] = None,
         version: str = "v0.1",
     ) -> None:
-        super().__init__(source=self.SOURCE, stage=self.STAGE, chunk=chunk)
-        assert isinstance(chunk, int) and chunk >= 0
-        self.output_root = Path(output_root)
+        super().__init__(
+            source=self.SOURCE,
+            stage=self.STAGE,
+            chunk=chunk,
+            output_root=Path(output_root),
+        )
+        # Parent already validated chunk + set self.output_root / self.output_dir.
         self.rlds_data_dir = rlds_data_dir
         self.karlp_droid_root = Path(karlp_droid_root) if karlp_droid_root else None
         self.version = version
-        self.output_root.mkdir(parents=True, exist_ok=True)
 
         self._karlp_lookup: Optional[dict[str, str]] = None  # episode_id -> instruction
 
@@ -170,14 +173,20 @@ class DroidConverter(CheckpointedJob):
 
         my_indices = shard_assignment(n_total=n_total, chunk=self.chunk)
         for ep_idx in my_indices:
+            # Canonical EpisodeRef schema (matches bridge / rh20t / oxe_auge):
+            # episode_id is a string; the integer index is recovered via int().
             yield EpisodeRef(
+                episode_id=str(int(ep_idx)),
                 source=self.SOURCE,
-                episode_index=int(ep_idx),
-                shard_hash=episode_filename_hash(int(ep_idx), self.SOURCE, self.version),
+                raw_path=self.rlds_data_dir,
             )
 
+    def _ep_shard_hash(self, ep: EpisodeRef) -> str:
+        """Return the deterministic 12-char shard hash for one episode."""
+        return episode_filename_hash(int(ep.episode_id), self.SOURCE, self.version)
+
     def is_done(self, ep: EpisodeRef) -> bool:
-        marker = self.output_root / f"ep_{ep.shard_hash}.done"
+        marker = self.output_root / f"ep_{self._ep_shard_hash(ep)}.done"
         return marker.exists()
 
     def process(self, ep: EpisodeRef) -> None:
@@ -185,8 +194,8 @@ class DroidConverter(CheckpointedJob):
         if result is None:
             return
         self._stage_episode(result)
-        marker = self.output_root / f"ep_{ep.shard_hash}.done"
-        marker.write_text(json.dumps({"episode_index": ep.episode_index}))
+        marker = self.output_root / f"ep_{self._ep_shard_hash(ep)}.done"
+        marker.write_text(json.dumps({"episode_index": int(ep.episode_id)}))
 
     # ----- conversion ------------------------------------------------------
 
@@ -206,17 +215,19 @@ class DroidConverter(CheckpointedJob):
                 "DROID conversion requires tensorflow + tensorflow_datasets at runtime"
             )
 
+        ep_index = int(ep.episode_id)
         builder = tfds.builder("droid", data_dir=self.rlds_data_dir)
-        ds = builder.as_dataset(split=f"train[{ep.episode_index}:{ep.episode_index + 1}]")
+        ds = builder.as_dataset(split=f"train[{ep_index}:{ep_index + 1}]")
         for tf_episode in ds.take(1):
             return self._tf_episode_to_result(tf_episode, ep)
         return None
 
     def _tf_episode_to_result(self, tf_episode, ep: EpisodeRef) -> ConversionResult:
         """Pure data-shaping. No I/O. Easy to unit-test if a dummy is passed in."""
+        ep_index = int(ep.episode_id)
         steps = list(tf_episode["steps"].as_numpy_iterator())
         T = len(steps)
-        assert T > 0, f"empty DROID episode {ep.episode_index}"
+        assert T > 0, f"empty DROID episode {ep_index}"
 
         # Cameras
         cameras: dict[str, np.ndarray] = {}
@@ -241,10 +252,24 @@ class DroidConverter(CheckpointedJob):
         action_mask = np.zeros((32,), dtype=bool)
         action_mask[:DROID_ACTION_DIM] = True
 
-        state_raw = np.stack(
-            [np.asarray(s["observation"]["robot_state"], dtype=np.float32) for s in steps],
+        # DROID 1.0.1 RLDS exposes proprio as three separate keys; we
+        # concatenate into a single robot_state vector of length 14:
+        #   [joint_position(7), gripper_position(1), cartesian_position(6)]
+        # Earlier in development the converter assumed a flat "robot_state"
+        # key, which doesn't exist in the actual schema.
+        joint_pos = np.stack(
+            [np.asarray(s["observation"]["joint_position"], dtype=np.float32) for s in steps],
             axis=0,
-        )
+        )  # (T, 7)
+        gripper_pos = np.stack(
+            [np.asarray(s["observation"]["gripper_position"], dtype=np.float32) for s in steps],
+            axis=0,
+        )  # (T, 1)
+        cart_pos = np.stack(
+            [np.asarray(s["observation"]["cartesian_position"], dtype=np.float32) for s in steps],
+            axis=0,
+        )  # (T, 6)
+        state_raw = np.concatenate([joint_pos, gripper_pos, cart_pos], axis=1)  # (T, 14)
         state = np.zeros((T, 50), dtype=np.float32)
         d_state = min(state_raw.shape[1], 50)
         state[:, :d_state] = state_raw[:, :d_state]
@@ -259,7 +284,7 @@ class DroidConverter(CheckpointedJob):
         rlds_instr = ""
         if "language_instruction" in steps[0]:
             rlds_instr = bytes(steps[0]["language_instruction"]).decode("utf-8", errors="ignore")
-        cleaned_instr = self._resolve_instruction(str(ep.episode_index), rlds_instr)
+        cleaned_instr = self._resolve_instruction(ep.episode_id, rlds_instr)
         instructions = {
             "level_1": [cleaned_instr] * T,  # high-level goal
             "level_2": [""] * T,  # not provided by DROID
@@ -269,7 +294,7 @@ class DroidConverter(CheckpointedJob):
         timestamps = np.arange(T, dtype=np.float32) / float(DROID_FPS)
 
         return ConversionResult(
-            episode_index=int(ep.episode_index),
+            episode_index=ep_index,
             embodiment=DROID_EMBODIMENT,
             fps=DROID_FPS,
             cameras=cameras,
@@ -282,7 +307,7 @@ class DroidConverter(CheckpointedJob):
             instructions=instructions,
             force_torque=None,
             timestamps=timestamps,
-            raw_meta={"droid_episode_id": str(ep.episode_index), "rlds_instruction": rlds_instr},
+            raw_meta={"droid_episode_id": ep.episode_id, "rlds_instruction": rlds_instr},
         )
 
     # ----- shard writing ---------------------------------------------------
