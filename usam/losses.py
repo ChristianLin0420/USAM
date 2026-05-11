@@ -238,7 +238,11 @@ class USAMUnifiedLoss(nn.Module):
         per_loss["flow"] = self._flow_match(predictions, targets, masks, "flow")
 
         # ---- Auxiliary: geometric consistency ----------------------------------
-        if "geom" in predictions:
+        # Skip the (expensive, shape-picky) compute when this component's
+        # weight is zero — its contribution to the total is zero anyway.
+        # This matters during the early ramp (geom=0 for steps < ramp_start)
+        # and for smoke runs that explicitly disable an aux head.
+        if "geom" in predictions and self.weights.geom != 0.0:
             geom_inputs = predictions["geom"]
             assert isinstance(geom_inputs, Mapping), (
                 "predictions['geom'] must be a dict with depth_dino_pred + rgb_dino_pred"
@@ -250,7 +254,7 @@ class USAMUnifiedLoss(nn.Module):
             per_loss["geom"] = self._zero(predictions)
 
         # ---- Auxiliary: flow-action consistency --------------------------------
-        if "flow_act" in predictions:
+        if "flow_act" in predictions and self.weights.flow_act != 0.0:
             fa_inputs = predictions["flow_act"]
             assert isinstance(fa_inputs, Mapping), (
                 "predictions['flow_act'] must be a dict with proprio, action_chunk, flow_dino_pred"
