@@ -83,9 +83,14 @@ def _load_searaft(ckpt: Optional[Union[str, Path]]):
     if ckpt is None:
         return None
     try:
+        import torch  # type: ignore
         from sea_raft.api import load_searaft  # type: ignore
 
-        return load_searaft(str(ckpt))
+        model = load_searaft(str(ckpt))
+        # Move to CUDA and eval mode — the shim returns the model on CPU.
+        if torch.cuda.is_available():
+            model = model.cuda()
+        return model.eval()
     except ImportError as e:  # pragma: no cover - only hit at real runtime
         raise RuntimeError(
             "SEA-RAFT is required for stage_2b_compute_flow at runtime "

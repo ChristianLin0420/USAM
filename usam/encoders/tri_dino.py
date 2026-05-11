@@ -26,7 +26,7 @@ a tiny randomly-initialised stand-in that mirrors the relevant interface.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Iterable, Literal, Mapping, Optional
 
 import torch
 from torch import Tensor, nn
@@ -446,7 +446,7 @@ class TriDINOTower(nn.Module):
                 )
         self._lora_routed = True
 
-    def _run_backbone(self, prefix_tokens: Tensor, patch_tokens: Tensor) -> Tensor:
+    def _run_backbone(self, pixel_values: Tensor, patch_tokens: Tensor) -> Tensor:
         """Run the frozen backbone on already-embedded tokens.
 
         We replace the backbone's patch_embed step (which expects raw
@@ -454,6 +454,17 @@ class TriDINOTower(nn.Module):
         directly into the encoder + final layernorm. This lets us use a
         per-modality patch embedding while keeping the rest of the
         backbone bit-identical to the upstream model.
+
+        Parameters
+        ----------
+        pixel_values : Tensor
+            The original ``[B, C, H, W]`` input, kept around so we can call
+            ``self.backbone.rope_embeddings(pixel_values)`` for DINOv3-style
+            backbones that compute RoPE from H/W. Not used for old-style
+            DINOv2 / MiniDinoBackbone backbones (those have absolute
+            position embeddings stored as a parameter).
+        patch_tokens : Tensor
+            Modality-specific patch embeddings, shape ``[B, num_patches, D]``.
         """
         emb = self.backbone.embeddings
         b = patch_tokens.shape[0]
@@ -463,7 +474,7 @@ class TriDINOTower(nn.Module):
         if regs is not None:
             prefix.append(regs.expand(b, -1, -1))
         x = torch.cat(prefix + [patch_tokens], dim=1)
-        # Add absolute position embeddings if present.
+        # Old-style absolute position embeddings (DINOv2 / MiniDinoBackbone).
         # DINOv3 uses RoPE applied inside attention; emb has no
         # position_embeddings, so the getattr returns None and we skip the
         # absolute pos-add for those backbones.
@@ -490,9 +501,23 @@ class TriDINOTower(nn.Module):
                 f"has encoder={encoder_mod is not None}, "
                 f"has layer={hasattr(self.backbone, 'layer')}"
             )
+        # Compute RoPE if the backbone has a rope_embeddings module
+        # (DINOv3). DINOv3 layers REQUIRE position_embeddings=(cos, sin) —
+        # passing only the hidden state fails with `cannot unpack
+        # non-iterable NoneType object` deep inside the attention forward.
+        rope_mod = getattr(self.backbone, "rope_embeddings", None)
+        rope: Optional[tuple[Tensor, Tensor]] = None
+        if isinstance(rope_mod, nn.Module):
+            rope = rope_mod(pixel_values)
+
         out = x
         for layer in layers:
-            out = layer(out)
+            if rope is not None:
+                # DINOv3 ViT layer signature: (hidden_states, attention_mask=None,
+                # position_embeddings=(cos, sin)).
+                out = layer(out, attention_mask=None, position_embeddings=rope)
+            else:
+                out = layer(out)
             # Some HF blocks return a tuple (hidden_state, attn_weights);
             # unwrap so the next block sees a plain Tensor.
             if isinstance(out, tuple):
@@ -530,7 +555,8 @@ class TriDINOTower(nn.Module):
 
         patch_tokens = self._patch_embed(x, modality)
         # The [CLS] / register prefix is added inside _run_backbone.
-        return self._run_backbone(prefix_tokens=None, patch_tokens=patch_tokens)
+        # pixel_values is needed for DINOv3 RoPE; non-RoPE backbones ignore it.
+        return self._run_backbone(pixel_values=x, patch_tokens=patch_tokens)
 
     @torch.no_grad()
     def extract_features(
