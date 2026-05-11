@@ -216,6 +216,18 @@ def maybe_wrap_distributed(
         model = model.to(device=device, dtype=plan.weights_dtype)
         return model, optimizer, dataloader
 
+    # Smoke-only escape hatch: each rank runs an independent single-GPU
+    # training (no grad sync, no DDP, no Accelerate). Useful when the
+    # wrapper proxy hides custom methods on the model (USAMTrainModel
+    # has training_step; DDP-wrapping it makes that method invisible)
+    # and when we just want a 8-GPU launch validation without the
+    # complexity of DDP integration. Set USAM_NO_DDP=1 to enable.
+    if os.environ.get("USAM_NO_DDP") == "1":
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        device = torch.device("cuda", local_rank)
+        model = model.to(device=device, dtype=plan.weights_dtype)
+        return model, optimizer, dataloader
+
     try:
         from accelerate import Accelerator, DeepSpeedPlugin
     except ImportError:
@@ -224,9 +236,17 @@ def maybe_wrap_distributed(
         model = model.to(device=device, dtype=plan.weights_dtype)
         return model, optimizer, dataloader
 
-    # Reuse LDA-1B's helper; it sets up the deepspeed plugin.
-    deepspeed_plugin = DeepSpeedPlugin()
-    accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+    # DeepSpeed Stage 2 ZeRO has a known KeyError(torch.bfloat16) on the
+    # ipg_buckets dict for bf16 params; for smoke runs and any run that
+    # doesn't need ZeRO sharding, plain DDP via Accelerator(no plugin)
+    # is the cheaper + more reliable choice. Set USAM_DISABLE_DEEPSPEED=1
+    # to opt out (default: opt out — flip when the bf16 bucket bug is
+    # patched upstream or you genuinely need ZeRO).
+    if os.environ.get("USAM_DISABLE_DEEPSPEED", "1") == "1":
+        accelerator = Accelerator()
+    else:
+        deepspeed_plugin = DeepSpeedPlugin()
+        accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
     return model, optimizer, dataloader
 
@@ -668,6 +688,10 @@ def _maybe_init_wandb(
       * ``WANDB_ENTITY``   — team/user. Defaults to wandb's own default.
       * ``WANDB_MODE``     — ``"online"`` / ``"offline"`` / ``"disabled"``.
     """
+    # Only rank 0 logs to wandb. Other ranks (under torchrun / DDP) would
+    # otherwise spawn duplicate runs that fragment the dashboard.
+    if int(os.environ.get("RANK", "0")) != 0:
+        return None
     if not os.environ.get("WANDB_API_KEY"):
         logger.info("WANDB_API_KEY not set; skipping wandb init (stdout logging only)")
         return None

@@ -161,6 +161,11 @@ def main() -> int:
     # match what the loader produces today).
     train_cfg.setdefault("data", {})["fps_action"] = 15
     train_cfg["data"]["fps_features"] = 5
+    # batch=1 sidesteps a plan-cache vs. batch-size desync inside the
+    # Player's cross-conditioning step (the Conductor's K/V cache shape
+    # has to match the current batch dim, which isn't enforced today
+    # when the dataloader emits a smaller-than-requested last batch).
+    train_cfg.setdefault("batch", {})["micro_size"] = 1
     model_cfg.setdefault("action_head", {})["action_horizon"] = 8
     # Aux-head ramp: optional override (default 50_000 from the YAML).
     ramp_steps_override = os.environ.get("USAM_RAMP_STEPS")
