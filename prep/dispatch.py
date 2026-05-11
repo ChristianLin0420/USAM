@@ -153,7 +153,10 @@ def sbatch_launcher(
     sbatch_path: str = "sbatch",
     template: str = "slurm/job.sbatch",
 ) -> tuple[int, str]:
-    """Production launcher: ``sbatch slurm/job.sbatch <stage> <source> <chunk>``.
+    """Production launcher: ``sbatch slurm/job.sbatch <stage> <dataset> <chunk>``.
+
+    The dataset name is the second positional arg (formerly called ``source``);
+    ``slurm/job.sbatch`` forwards it to the python module via ``--dataset``.
 
     Returns ``(0, job_id)`` on successful submission. The actual job
     completion is observed asynchronously via the per-stage marker files
@@ -363,10 +366,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="prep.dispatch", description=__doc__)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--state", type=Path, default=Path("dispatch_state.json"))
-    parser.add_argument("--sources", nargs="+", required=True)
-    parser.add_argument("--chunks-per-source", type=int, default=1,
-                        help="Uniform chunk count per source. For a heterogeneous mix, "
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument("--datasets", nargs="+",
+                    help="Dataset names to schedule (one A100 node per dataset, "
+                         "per Wave F).")
+    ds.add_argument("--sources", dest="datasets", nargs="+",
+                    help="(deprecated) use --datasets")
+    parser.add_argument("--chunks-per-dataset", type=int, default=1,
+                        help="Uniform chunk count per dataset. For a heterogeneous mix, "
                              "edit dispatch_state.json directly after the first run.")
+    parser.add_argument("--chunks-per-source", dest="chunks_per_dataset", type=int,
+                        help="(deprecated) use --chunks-per-dataset")
     parser.add_argument("--max-pending", type=int,
                         default=int(os.environ.get("USAM_MAX_PENDING", "64")))
     parser.add_argument("--poll-seconds", type=int, default=60)
@@ -380,8 +390,8 @@ def main(argv: list[str] | None = None) -> int:
         output_root=args.output_root,
         max_pending=args.max_pending,
         state_path=args.state,
-        sources=list(args.sources),
-        chunks_per_source={s: int(args.chunks_per_source) for s in args.sources},
+        sources=list(args.datasets),
+        chunks_per_source={s: int(args.chunks_per_dataset) for s in args.datasets},
         poll_seconds=args.poll_seconds,
     )
     if args.once:

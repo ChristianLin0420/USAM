@@ -222,19 +222,23 @@ def write_report(report: ValidationReport, dest: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     """CLI: validate all shards for a source and exit 0 only on full pass."""
     parser = argparse.ArgumentParser(prog="prep.stage_5_validate")
-    parser.add_argument("--source", required=True)
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument("--dataset",
+                    help="Source name (one A100 node per dataset, per Wave F).")
+    ds.add_argument("--source", dest="dataset",
+                    help="(deprecated) use --dataset")
     parser.add_argument("--output-root", required=True, type=Path,
-                        help="Root containing <source>/{data,videos,features}/")
+                        help="Root containing <dataset>/{data,videos,features}/")
     parser.add_argument("--report", type=Path, default=None,
                         help="Where to write validation_report.json "
-                             "(default: <output-root>/<source>/validation_report.json)")
+                             "(default: <output-root>/<dataset>/validation_report.json)")
     parser.add_argument("--resume", action="store_true",
                         help="Accepted for symmetry with other stages; validation is stateless")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
 
-    report = validate_source_outputs(args.output_root, args.source)
-    dest = args.report or (args.output_root / args.source / "validation_report.json")
+    report = validate_source_outputs(args.output_root, args.dataset)
+    dest = args.report or (args.output_root / args.dataset / "validation_report.json")
     write_report(report, dest)
 
     fails = sum(v for k, v in report.summary.items() if k.endswith("_fail"))

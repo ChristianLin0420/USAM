@@ -71,16 +71,16 @@ fi
 
 echo "[prep_run_local] stage 1: index"
 "$PYTHON" -m prep.stage_1_index \
-  --source "$SOURCE" --raw "$RAW" --out "$OUT" --chunk "$CHUNK"
+  --dataset "$SOURCE" --raw "$RAW" --out "$OUT" --chunk "$CHUNK"
 
 # Stages 2a, 2b, 2c, 3, 4 are owned by data-engineer; entry points accept
-# --source / --chunk / --resume per docs/IMPLEMENTATION_PLAN.md §10.1.
+# --dataset / --chunk / --resume (Wave F: one A100 node per dataset).
 for STAGE in stage_2a_to_lerobot stage_2b_compute_flow stage_2c_compute_depth \
              stage_3_canonical stage_4_dino_cache; do
   echo "[prep_run_local] $STAGE"
   set +e
   "$PYTHON" -m "prep.${STAGE}" \
-    --source "$SOURCE" --chunk "$CHUNK" --resume
+    --dataset "$SOURCE" --chunk "$CHUNK" --resume
   RC=$?
   set -e
   if [[ "$RC" -ne 0 && "$RC" -ne 124 ]]; then
@@ -91,6 +91,6 @@ done
 
 echo "[prep_run_local] stage 5: validate"
 "$PYTHON" -m prep.stage_5_validate \
-  --source "$SOURCE" --output-root "$OUT"
+  --dataset "$SOURCE" --output-root "$OUT"
 
 echo "[prep_run_local] done. Outputs at $OUT/$SOURCE"

@@ -17,9 +17,12 @@
 #   other : real failure, do not requeue
 #
 # Usage (from a login node):
-#   sbatch slurm/job.sbatch <stage> <source> <chunk> [extra args...]
+#   sbatch slurm/job.sbatch <stage> <dataset> <chunk> [extra args...]
 # e.g.
 #   sbatch slurm/job.sbatch stage_2a_to_lerobot.droid droid 7
+#
+# The <dataset> positional is forwarded to the python module as
+# ``--dataset <dataset>`` (Wave F: one A100 node per dataset).
 #
 #SBATCH --job-name=usam
 #SBATCH --partition=gpu
@@ -48,12 +51,12 @@ mkdir -p "${USAM_REPO}/logs"
 # Argument parsing
 # ---------------------------------------------------------------------------
 if [[ $# -lt 3 ]]; then
-    echo "Usage: $0 <stage_module> <source> <chunk> [extra args...]" >&2
+    echo "Usage: $0 <stage_module> <dataset> <chunk> [extra args...]" >&2
     echo "  e.g. $0 stage_2a_to_lerobot.droid droid 7" >&2
     exit 2
 fi
 STAGE="$1"
-SOURCE="$2"
+DATASET="$2"
 CHUNK="$3"
 shift 3
 EXTRA=("$@")
@@ -81,7 +84,7 @@ trap preempt_handler USR1
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
-echo "[$(date -Is)] [job.sbatch] launching stage=${STAGE} source=${SOURCE} chunk=${CHUNK}"
+echo "[$(date -Is)] [job.sbatch] launching stage=${STAGE} dataset=${DATASET} chunk=${CHUNK}"
 echo "[$(date -Is)] [job.sbatch] SLURM_JOB_ID=${SLURM_JOB_ID:-?} node=$(hostname)"
 
 # We background the singularity invocation so the bash trap can fire on the
@@ -92,7 +95,7 @@ singularity exec --nv \
     --bind /home:/home \
     "${USAM_SIF}" \
     bash -lc "cd ${USAM_REPO} && python -u -m prep.${STAGE} \
-        --source ${SOURCE} --chunk ${CHUNK} --resume ${EXTRA[*]:-}" &
+        --dataset ${DATASET} --chunk ${CHUNK} --resume ${EXTRA[*]:-}" &
 PYPID=$!
 
 # `wait` is interruptible by signals; on SIGUSR1 the trap fires, the python

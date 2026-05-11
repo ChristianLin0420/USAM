@@ -279,7 +279,11 @@ def watch_source(
 def main(argv: list[str] | None = None) -> int:
     """CLI driver. ``--watch`` runs the long-lived CommitScheduler."""
     parser = argparse.ArgumentParser(prog="prep.stage_6_upload", description=__doc__)
-    parser.add_argument("--source", required=True)
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument("--dataset",
+                    help="Source name (one A100 node per dataset, per Wave F).")
+    ds.add_argument("--source", dest="dataset",
+                    help="(deprecated) use --dataset")
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--repo-prefix", default="<org>/usam-")
     parser.add_argument("--repo-id", default=None,
@@ -297,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.watch:
         scheduler = watch_source(
-            source=args.source,
+            source=args.dataset,
             output_root=args.output_root,
             repo_prefix=args.repo_prefix,
             every_minutes=args.every_minutes,
@@ -316,7 +320,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     upload_source(
-        source=args.source,
+        source=args.dataset,
         output_root=args.output_root,
         repo_prefix=args.repo_prefix,
         repo_id=args.repo_id,

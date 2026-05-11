@@ -345,9 +345,13 @@ def _merge_manifest_shards(chunk_dir: Path, source: str) -> Path:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """``python -m prep.stage_1_index --source droid --raw /scratch/.../raw --out /scratch/.../manifests``."""
+    """``python -m prep.stage_1_index --dataset droid --raw /scratch/.../raw --out /scratch/.../manifests``."""
     parser = argparse.ArgumentParser(prog="prep.stage_1_index")
-    parser.add_argument("--source", required=True, choices=sorted(_ENUMERATORS.keys()))
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument("--dataset", choices=sorted(_ENUMERATORS.keys()),
+                    help="Source name (one A100 node per dataset, per Wave F).")
+    ds.add_argument("--source", dest="dataset", choices=sorted(_ENUMERATORS.keys()),
+                    help="(deprecated) use --dataset")
     parser.add_argument("--raw", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--chunk", type=int, default=0)
@@ -355,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="kept for parity with other stages; IndexJob is always resumable")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-    manifest = build_index_for_source(args.source, args.raw, args.out, chunk=args.chunk)
+    manifest = build_index_for_source(args.dataset, args.raw, args.out, chunk=args.chunk)
     print(f"manifest written: {manifest}")
     return 0
 

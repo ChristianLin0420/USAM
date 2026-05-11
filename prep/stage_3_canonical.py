@@ -319,6 +319,102 @@ def validate_action_canonical(action_canonical_ee: np.ndarray) -> None:
     assert ((grip >= -1e-4) & (grip <= 1.0 + 1e-4)).all(), "gripper out of [0, 1]"
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    """``python -m prep.stage_3_canonical --dataset droid --chunk 0``.
+
+    Per-chunk canonicalization driver. Walks ``<staged-root>/<dataset>/chunk-NNN/
+    ep_*/action_native.npy``, applies the embodiment rule, and writes
+    ``action_canonical_ee.npy`` next to the input. This is the per-A100-node
+    entry point used by ``slurm/job.sbatch`` (Wave F).
+    """
+    import argparse
+    import logging as _logging
+    import os as _os
+
+    parser = argparse.ArgumentParser(
+        prog="prep.stage_3_canonical", description=__doc__
+    )
+    scratch_default = Path(_os.environ.get("USAM_SCRATCH", "/scratch/usam"))
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument(
+        "--dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="Source name (one A100 node per dataset).",
+    )
+    ds.add_argument(
+        "--source",
+        dest="dataset",
+        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        help="(deprecated) use --dataset",
+    )
+    parser.add_argument("--chunk", required=True, type=int)
+    parser.add_argument(
+        "--staged-root",
+        type=Path,
+        default=scratch_default / "staged",
+        help="Root containing <dataset>/chunk-NNN/ep_*/ directories.",
+    )
+    parser.add_argument(
+        "--embodiment",
+        type=str,
+        default=None,
+        help="Override embodiment key. Defaults to the dataset name's canonical "
+             "embodiment (e.g. droid -> droid_franka).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Accepted for parity; canonicalization is always per-episode idempotent.",
+    )
+    args = parser.parse_args(argv)
+    _logging.basicConfig(level=_logging.INFO)
+    log = _logging.getLogger("prep.stage_3_canonical")
+
+    _DATASET_TO_EMBODIMENT = {
+        "droid": "droid_franka",
+        "bridge": "bridge_widowx",
+        "agibot2026": "agibot_g1",
+        "oxe_auge": "oxe_mixed",
+        "rh20t": "rh20t_franka",
+        "robomind": "robomind_franka",
+    }
+    embodiment = args.embodiment or _DATASET_TO_EMBODIMENT.get(args.dataset, args.dataset)
+    registry = load_embodiment_registry()
+    if embodiment not in registry:
+        raise SystemExit(
+            f"unknown embodiment {embodiment!r} for dataset {args.dataset!r}; "
+            f"have {sorted(registry)}"
+        )
+
+    chunk_dir = args.staged_root / args.dataset / f"chunk-{args.chunk:03d}"
+    if not chunk_dir.exists():
+        log.warning("staged chunk dir %s does not exist; nothing to do", chunk_dir)
+        return 0
+
+    processed = 0
+    for ep_dir in sorted(chunk_dir.glob("ep_*")):
+        action_native_path = ep_dir / "action_native.npy"
+        if not action_native_path.exists():
+            log.debug("skipping %s (no action_native.npy)", ep_dir.name)
+            continue
+        action_native = np.load(action_native_path)
+        canonical = canonicalize_action(action_native, embodiment, registry=registry)
+        validate_action_canonical(canonical)
+        np.save(ep_dir / "action_canonical_ee.npy", canonical)
+        processed += 1
+    log.info("canonicalized %d episode(s) under %s", processed, chunk_dir)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    import sys
+
+    sys.exit(main())
+
+
 __all__ = [
     "CanonicalRule",
     "canonicalize_action",

@@ -390,7 +390,7 @@ __all__ = ["DinoCacheConfig", "encode_chunk", "encode_chunk_multigpu"]
 # CLI
 # ---------------------------------------------------------------------------
 def main(argv: list[str] | None = None) -> int:
-    """``python -m prep.stage_4_dino_cache --source droid --chunk 0 --num-gpus 8``.
+    """``python -m prep.stage_4_dino_cache --dataset droid --chunk 0 --num-gpus 8``.
 
     NOTE: the Wave-B plan template proposed ``tyro``; the rest of ``prep/``
     (stage_1_index, stage_5_validate, stage_6_upload, dispatch,
@@ -404,8 +404,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="prep.stage_4_dino_cache",
                                      description=__doc__)
     scratch_default = Path(_os.environ.get("USAM_SCRATCH", "/scratch/usam"))
-    parser.add_argument("--source", required=True,
-                        help="Source name (e.g. 'droid', 'bridge'). Used to build paths.")
+    ds = parser.add_mutually_exclusive_group(required=True)
+    ds.add_argument("--dataset",
+                    help="Source name (e.g. 'droid', 'bridge'). Used to build paths. "
+                         "One A100 node per dataset (Wave F).")
+    ds.add_argument("--source", dest="dataset",
+                    help="(deprecated) use --dataset")
     parser.add_argument("--chunk", required=True, type=int,
                         help="Chunk index.")
     parser.add_argument("--staged-root", type=Path,
@@ -438,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
 
-    chunk_dir = args.staged_root / args.source / f"chunk-{args.chunk:03d}"
+    chunk_dir = args.staged_root / args.dataset / f"chunk-{args.chunk:03d}"
     cfg = DinoCacheConfig(
         target_hw=(args.target_h, args.target_w),
         n_keep_tokens=args.n_keep_tokens,
@@ -448,7 +452,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     encode_chunk_multigpu(
         staged_chunk_dir=chunk_dir,
-        output_root=args.output_root / args.source,
+        output_root=args.output_root / args.dataset,
         dinov3_ckpt=Path(args.dinov3_ckpt),
         dinov3_arch=args.dinov3_arch,
         source_fps=args.source_fps,
