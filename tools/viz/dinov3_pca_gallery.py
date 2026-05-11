@@ -1,17 +1,25 @@
-"""Wave I: PCA visualization of DINOv3 patch features over real DROID frames.
+"""DINOv3 + depth + flow visualization gallery for a USAM prep chunk.
 
-For each of ~10 representative frames from each episode/camera:
-  * Save the original RGB frame at 448×448 (the encoder input resolution).
-  * Run DINOv3 ViT-L/16, extract patch tokens (drop CLS + register tokens),
-    reshape to a 28×28 patch grid.
-  * PCA the 1024-D patch features to 3 channels → normalize to [0, 255] → save
-    as a side-by-side image alongside the RGB.
+For each (episode, camera) in /workspace/output/staged, samples N frames
+evenly and saves a 4-column side-by-side image:
 
-Output lands at /workspace/output/viz/dinov3_chunk0/:
-  ep_<hash>/<cam>/frame_<NNN>_rgb.png
-  ep_<hash>/<cam>/frame_<NNN>_pca.png
-  ep_<hash>/<cam>/frame_<NNN>_sxs.png   (side-by-side)
-  index.html                            (browsable gallery)
+    [   RGB   |  DINOv3 PCA  |   Depth viz   |    Flow viz   ]
+
+  * RGB:   the original frame, resized to 448×448 (the DINOv3 input
+           resolution).
+  * DINO:  PCA of the 1024-D patch tokens to 3 channels → 28×28 grid →
+           upscaled to 448×448 with nearest-neighbour. Coherent color
+           regions on object/gripper/table boundaries indicate the
+           encoder is producing semantically meaningful patch features.
+  * Depth: per-frame min-max normalized + viridis colormap, upscaled to
+           448×448. Black = far, yellow = near (DA3MONO-LARGE outputs
+           metric mm depth, so smaller = nearer).
+  * Flow:  HSV-encoded (hue = direction, saturation = constant 255,
+           value = magnitude), upscaled to 448×448. Static background
+           ≈ black; moving regions take on direction-specific colors.
+
+Output lands under /workspace/output/viz/dinov3_chunk0/ with an
+index.html that groups frames by (episode, camera).
 """
 from __future__ import annotations
 
@@ -24,34 +32,77 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 warnings.filterwarnings("ignore")
 
 STAGED = Path("/workspace/output/staged")
+FLOW_OUT = Path("/workspace/output/flow")
+DEPTH_OUT = Path("/workspace/output/depth")
 VIZ_OUT = Path("/workspace/output/viz/dinov3_chunk0")
-FRAMES_PER_EP_CAM = 10  # 10 frames per (episode, camera) combo
+FRAMES_PER_EP_CAM = 10  # 10 frames per (episode, camera)
+TARGET_HW = (448, 448)
 
 
+# ---------------------------------------------------------------------------
+# Per-modality visualizers
+# ---------------------------------------------------------------------------
 def pca_3channel(patch_tokens: torch.Tensor) -> np.ndarray:
-    """patch_tokens: [num_patches, D] -> [H_grid, W_grid, 3] uint8 visualisation.
+    """[num_patches, D] -> [H_grid, W_grid, 3] uint8 RGB heatmap.
 
-    Uses torch.pca_lowrank for speed; normalises each channel to [0, 255]
-    independently for the cleanest visual contrast.
+    Three top PCA components mapped to R/G/B; each channel normalized to
+    [0, 255] independently for visual contrast.
     """
-    # patch_tokens is [N=784, D=1024]. PCA to 3 components.
     feats = patch_tokens.float()
     feats = feats - feats.mean(dim=0, keepdim=True)
-    # Use svd_lowrank (faster than torch.pca_lowrank wrapper).
-    u, s, v = torch.svd_lowrank(feats, q=3)
-    pca = feats @ v  # [N, 3]
+    _u, _s, v = torch.svd_lowrank(feats, q=3)
+    pca = feats @ v
     pca = pca - pca.amin(dim=0, keepdim=True)
     pca = pca / pca.amax(dim=0, keepdim=True).clamp(min=1e-6)
     grid = int(pca.shape[0] ** 0.5)
-    assert grid * grid == pca.shape[0], f"non-square grid: {pca.shape[0]} patches"
+    assert grid * grid == pca.shape[0], f"non-square grid: {pca.shape[0]}"
     pca = pca.reshape(grid, grid, 3)
     return (pca * 255.0).clamp(0, 255).to(torch.uint8).cpu().numpy()
+
+
+def depth_viz(depth_uint16: np.ndarray) -> np.ndarray:
+    """[H, W] uint16 (mm) -> [H, W, 3] uint8 RGB (viridis colormap).
+
+    Per-frame 2%–98% percentile clip + min-max normalize → OpenCV's
+    COLORMAP_VIRIDIS so near objects pop in bright yellow, far in dark
+    purple. Zero-valued (no-return) pixels get clipped to the dark end.
+    """
+    d = depth_uint16.astype(np.float32)
+    if d.max() > 0:
+        nonzero = d[d > 0]
+        if nonzero.size > 0:
+            lo, hi = np.percentile(nonzero, (2, 98))
+            d = np.clip(d, lo, hi)
+            d = (d - lo) / max(hi - lo, 1e-3)
+    d_uint8 = (d * 255.0).clip(0, 255).astype(np.uint8)
+    bgr = cv2.applyColorMap(d_uint8, cv2.COLORMAP_VIRIDIS)
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def flow_viz(flow_fp16: np.ndarray) -> np.ndarray:
+    """[H, W, 2] (uv) -> [H, W, 3] uint8 RGB (HSV-encoded).
+
+    Hue   = atan2(v, u) (direction)
+    Sat   = 255
+    Value = magnitude (per-frame max-normalized)
+
+    Mirrors the RAFT reference visualization.
+    """
+    f = flow_fp16.astype(np.float32)
+    fx, fy = f[..., 0], f[..., 1]
+    mag, ang = cv2.cartToPolar(fx, fy)
+    hsv = np.zeros((*f.shape[:2], 3), dtype=np.uint8)
+    hsv[..., 0] = (ang * 180.0 / np.pi / 2.0).astype(np.uint8)
+    hsv[..., 1] = 255
+    if mag.max() > 1e-3:
+        mag_norm = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
+        hsv[..., 2] = mag_norm.astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
 
 
 def main() -> int:
@@ -71,7 +122,7 @@ def main() -> int:
     tower = TriDINOTower(cfg).to(device).eval()
     print(f"loaded; num_patches={tower.num_patches} num_register_tokens={tower.num_register_tokens}", flush=True)
 
-    gallery_entries: list[tuple[str, str, str]] = []  # (label, rgb_relpath, pca_relpath)
+    gallery_entries: list[tuple[str, str]] = []  # (label, relpath)
 
     for ep_dir in sorted(STAGED.glob("ep_*")):
         ep_id = ep_dir.name
@@ -79,63 +130,90 @@ def main() -> int:
             rgb_path = ep_dir / f"camera_{cam}.npy"
             if not rgb_path.exists():
                 continue
-            arr = np.load(rgb_path)  # [T, H, W, 3] uint8
-            T = arr.shape[0]
+            depth_path = DEPTH_OUT / ep_id / f"depth_{cam}.npy"
+            flow_path = FLOW_OUT / ep_id / f"flow_{cam}.npy"
+
+            arr_rgb = np.load(rgb_path)            # [T, H, W, 3] uint8
+            arr_depth = np.load(depth_path) if depth_path.exists() else None
+            arr_flow = np.load(flow_path) if flow_path.exists() else None
+
+            T = arr_rgb.shape[0]
             idxs = np.linspace(0, T - 1, FRAMES_PER_EP_CAM, dtype=int)
             out_dir = VIZ_OUT / ep_id / cam
             out_dir.mkdir(parents=True, exist_ok=True)
             print(f"\n  {ep_id}/{cam}: T={T} -> {len(idxs)} frames", flush=True)
 
             for i, t in enumerate(idxs):
-                frame_uint8 = arr[t]  # [H_src, W_src, 3] uint8, e.g., 180x320x3
-                # Resize to 448x448 (encoder input resolution).
-                rgb_448 = cv2.resize(frame_uint8, (448, 448), interpolation=cv2.INTER_AREA)
-                # To tensor [1, 3, 448, 448] float32 in [0, 1].
+                # ----- RGB
+                rgb = arr_rgb[t]
+                rgb_448 = cv2.resize(rgb, TARGET_HW[::-1], interpolation=cv2.INTER_AREA)
+
+                # ----- DINOv3 PCA
                 x = torch.from_numpy(rgb_448).permute(2, 0, 1).unsqueeze(0).float() / 255.0
                 x = x.to(device)
-
                 with torch.no_grad():
-                    out = tower(x, modality="rgb")  # [1, 1+R+P, D]
-                # Drop CLS + register tokens; keep all 784 patch tokens.
-                patch_tokens = out[0, 1 + tower.num_register_tokens:, :]  # [784, 1024]
-                pca_grid = pca_3channel(patch_tokens)  # [28, 28, 3] uint8
-                # Upscale PCA to 448x448 for side-by-side with RGB.
-                pca_448 = cv2.resize(pca_grid, (448, 448), interpolation=cv2.INTER_NEAREST)
-                # Side-by-side composite (448 x 896 x 3).
-                sxs = np.concatenate([rgb_448, pca_448], axis=1)
+                    out = tower(x, modality="rgb")
+                patch_tokens = out[0, 1 + tower.num_register_tokens:, :]
+                pca_grid = pca_3channel(patch_tokens)
+                pca_448 = cv2.resize(pca_grid, TARGET_HW[::-1], interpolation=cv2.INTER_NEAREST)
 
-                rgb_p = out_dir / f"frame_{i:02d}_t{t:04d}_rgb.png"
-                pca_p = out_dir / f"frame_{i:02d}_t{t:04d}_pca.png"
-                sxs_p = out_dir / f"frame_{i:02d}_t{t:04d}_sxs.png"
-                cv2.imwrite(str(rgb_p), cv2.cvtColor(rgb_448, cv2.COLOR_RGB2BGR))
-                cv2.imwrite(str(pca_p), cv2.cvtColor(pca_448, cv2.COLOR_RGB2BGR))
+                # ----- Depth
+                if arr_depth is not None:
+                    d_viz = depth_viz(arr_depth[t])
+                else:
+                    d_viz = np.zeros((*TARGET_HW, 3), dtype=np.uint8)
+                depth_448 = cv2.resize(d_viz, TARGET_HW[::-1], interpolation=cv2.INTER_AREA)
+
+                # ----- Flow (T-1 frames; last frame replays previous flow)
+                if arr_flow is not None:
+                    flow_idx = min(t, arr_flow.shape[0] - 1)
+                    f_viz = flow_viz(arr_flow[flow_idx])
+                else:
+                    f_viz = np.zeros((*TARGET_HW, 3), dtype=np.uint8)
+                flow_448 = cv2.resize(f_viz, TARGET_HW[::-1], interpolation=cv2.INTER_AREA)
+
+                # ----- 4-column composite (448 x 1792 x 3)
+                sxs = np.concatenate([rgb_448, pca_448, depth_448, flow_448], axis=1)
+
+                sxs_p = out_dir / f"frame_{i:02d}_t{t:04d}_4col.png"
                 cv2.imwrite(str(sxs_p), cv2.cvtColor(sxs, cv2.COLOR_RGB2BGR))
                 rel = sxs_p.relative_to(VIZ_OUT).as_posix()
-                gallery_entries.append((f"{ep_id} / {cam} / t={t}", rel, rel))
+                gallery_entries.append((f"{ep_id} / {cam} / t={t}", rel))
                 print(f"    [{i}/{FRAMES_PER_EP_CAM}] t={t} -> {rel}", flush=True)
 
-    # HTML gallery — one row per side-by-side image.
+    # ---- HTML gallery ----
     html = ["<!DOCTYPE html><html><head><meta charset='utf-8'>",
-            "<title>USAM DINOv3 chunk-0 visualization</title>",
-            "<style>body{font-family:sans-serif;background:#1a1a1a;color:#eee;margin:20px;}",
+            "<title>USAM prep chunk-0 visualization</title>",
+            "<style>",
+            "body{font-family:sans-serif;background:#1a1a1a;color:#eee;margin:20px;}",
             "h1{color:#aef;} h2{color:#fea;margin-top:30px;border-bottom:1px solid #555;padding-bottom:4px;}",
-            "img{display:block;margin:6px 0 14px 0;max-width:100%;}",
-            ".row{margin:18px 0;} .label{color:#999;font-size:0.9em;}",
+            ".panels{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;",
+            "        max-width:1820px;margin:6px 0 16px 0;color:#aaa;font-size:0.85em;}",
+            "img{display:block;margin:6px 0 4px 0;max-width:100%;width:100%;}",
+            ".row{margin:18px 0;border:1px solid #333;padding:8px;border-radius:4px;background:#222;}",
+            ".label{color:#bbb;font-size:0.9em;margin-bottom:4px;}",
             "</style></head><body>",
-            "<h1>USAM DINOv3 ViT-L/16 — chunk-0 patch-feature visualization</h1>",
-            "<p>Left half: 448×448 RGB input. Right half: PCA(patch_tokens to 3 channels), 28×28 grid upscaled to 448×448. "
-            "Coherent regions of similar color in the PCA view indicate semantically grouped patches.</p>"]
+            "<h1>USAM prep chunk-0 — RGB · DINOv3 PCA · Depth · Flow</h1>",
+            "<p>Each row shows one frame's four panels in order:",
+            " <b>RGB</b> (original 448×448 input) ·",
+            " <b>DINOv3 PCA</b> (1024-D patch tokens projected to 3 channels, 28×28 grid) ·",
+            " <b>Depth</b> (DA3MONO-LARGE, viridis colormap; near=yellow, far=purple) ·",
+            " <b>Flow</b> (SEA-RAFT-M, HSV-encoded; hue=direction, value=magnitude).</p>"]
     last_section = None
-    for label, _rgb_rel, sxs_rel in gallery_entries:
-        section = label.rsplit(" / ", 1)[0]   # ep_xxx / cam
+    for label, rel in gallery_entries:
+        section = label.rsplit(" / ", 1)[0]
         if section != last_section:
             html.append(f"<h2>{escape(section)}</h2>")
             last_section = section
-        html.append(f'<div class="row"><div class="label">{escape(label)}</div>'
-                    f'<img src="{escape(sxs_rel)}" alt="{escape(label)}"></div>')
+        html.append(
+            f'<div class="row"><div class="label">{escape(label)}</div>'
+            f'<img src="{escape(rel)}" alt="{escape(label)}">'
+            f'<div class="panels"><span>RGB</span><span>DINOv3 PCA</span><span>Depth (viridis)</span><span>Flow (HSV)</span></div>'
+            f'</div>'
+        )
     html.append("</body></html>")
     (VIZ_OUT / "index.html").write_text("\n".join(html))
-    print(f"\nwrote {len(gallery_entries)} side-by-side frames + index.html under {VIZ_OUT}", flush=True)
+    print(f"\nwrote {len(gallery_entries)} 4-column frames + index.html under {VIZ_OUT}", flush=True)
     return 0
 
 

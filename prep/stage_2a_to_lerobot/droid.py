@@ -39,10 +39,16 @@ DROID_ACTION_DIM: int = 7
 DROID_EMBODIMENT: str = "droid_franka"
 DROID_FPS: int = 15
 # DROID's RLDS exposes two ``exterior_image_*`` and ``wrist_image_*`` keys.
-# We map to USAM's canonical camera names (head_rgb / wrist_rgb).
+# We map to USAM's canonical camera names. USAM follows the LDA-1B
+# convention of using only the EGOCENTRIC head view for world-model
+# training; wrist-cam adds redundant information that hurts the world
+# model's spatial coherence (the wrist view moves with the gripper and
+# breaks the world-frame stationarity DINOv3 expects). To re-enable
+# wrist for downstream tasks that benefit (e.g., contact-rich
+# manipulation policies), add ``"wrist_image_left": "wrist_rgb"`` here
+# and bump ``num_views`` to 2 in the model config.
 DROID_CAMERA_MAP = {
     "exterior_image_1_left": "head_rgb",
-    "wrist_image_left": "wrist_rgb",
 }
 
 

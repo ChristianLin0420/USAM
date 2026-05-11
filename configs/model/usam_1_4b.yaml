@@ -66,7 +66,7 @@ action_head:
   num_inference_timesteps: 10
   max_num_embodiments: 16
   obs_horizon: 4
-  num_views: 2
+  num_views: 1  # head-only egocentric (LDA-1B convention; see DROID_CAMERA_MAP)
   add_pos_embed: true
 
 # ---------------------------------------------------------------------------
