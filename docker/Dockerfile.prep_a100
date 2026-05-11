@@ -119,7 +119,7 @@ def load_searaft(ckpt_path: str) -> RAFT:
         Either a path to a local checkpoint file (*.pth / *.pt), a local
         directory baked by ``hf download`` containing ``model.safetensors``
         + ``config.json``, or a HuggingFace Hub model ID (e.g.
-        ``"princeton-vl/SEA-RAFT-L"`` or ``"princeton-vl/SEA-RAFT-M"``).
+        ``"MemorySlices/Tartan-C-T-TSKH-spring540x960-M"``).
 
     Returns
     -------
@@ -142,12 +142,12 @@ def load_searaft(ckpt_path: str) -> RAFT:
         # HF Hub model ID (or a local snapshot dir). RAFT.from_pretrained
         # requires an ``args`` config object — we resolve it from the bundled
         # ``config/eval/spring-{L,M,S}.json`` files in the cloned SEA-RAFT
-        # repo, picking the variant from the model id suffix.
-        variant = "L"
-        for tag in ("-L", "-M", "-S"):
-            if tag in ckpt_path:
-                variant = tag.lstrip("-")
-                break
+        # repo, picking the variant from the model id's LAST hyphenated
+        # token (e.g. ``MemorySlices/Tartan-C-T-TSKH-spring540x960-M`` -> ``M``).
+        # Defaults to ``M`` (only S/M variants are publicly published as of
+        # 2026-05; the paper's L weights were never released).
+        last_token = ckpt_path.rstrip("/").split("/")[-1].split("-")[-1]
+        variant = last_token if last_token in ("L", "M", "S") else "M"
         eval_cfg = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "config", "eval", f"spring-{variant}.json",
@@ -209,14 +209,19 @@ RUN --mount=type=secret,id=hf_token,required=false \
     && unset HUGGING_FACE_HUB_TOKEN HF_TOKEN
 
 # =============================================================================
-# Pre-download SEA-RAFT-L + Depth-Anything-V3 (DA3MONO-LARGE) Checkpoints
+# Pre-download SEA-RAFT (Tartan-C-T-TSKH-spring540x960-M) + DA3MONO-LARGE
 # =============================================================================
 # Bake both checkpoints into the image so prep nodes can run offline. The two
 # bakes share the same hf_token secret as the DINOv3 bake above.
 #
+# Note on SEA-RAFT variant choice: the paper reports an L (large) variant but
+# the weights were never released publicly — only S and M are published under
+# the ``MemorySlices`` org. We use ``Tartan-C-T-TSKH-spring540x960-M`` (the
+# Spring-finetuned medium, 19.7M params) as it has the best training mix.
+#
 # Outputs:
-#   /opt/searaft-ckpt/sea-raft-l/   (model.safetensors + config.json snapshot)
-#   ${HF_HOME}/hub/...              (DA3 weights, primed by from_pretrained)
+#   /opt/searaft-ckpt/tartan-c-t-tskh-spring540x960-M/  (model + config snapshot)
+#   ${HF_HOME}/hub/...                                  (DA3 weights, primed)
 RUN --mount=type=secret,id=hf_token,required=false \
     if [ -n "$HF_TOKEN" ]; then \
         export HUGGING_FACE_HUB_TOKEN="$(printf '%s' "$HF_TOKEN" | tr -d '[:space:]')"; \
@@ -224,11 +229,11 @@ RUN --mount=type=secret,id=hf_token,required=false \
         export HUGGING_FACE_HUB_TOKEN="$(tr -d '[:space:]' < /run/secrets/hf_token)"; \
     fi \
     && export HF_TOKEN="$HUGGING_FACE_HUB_TOKEN" \
-    && mkdir -p /opt/searaft-ckpt/sea-raft-l \
-    && hf download princeton-vl/SEA-RAFT-L \
-        --local-dir /opt/searaft-ckpt/sea-raft-l \
+    && mkdir -p /opt/searaft-ckpt/tartan-c-t-tskh-spring540x960-M \
+    && hf download MemorySlices/Tartan-C-T-TSKH-spring540x960-M \
+        --local-dir /opt/searaft-ckpt/tartan-c-t-tskh-spring540x960-M \
     && python -c "from depth_anything_3.api import DepthAnything3; m = DepthAnything3.from_pretrained('depth-anything/DA3MONO-LARGE'); print('✓ DA3MONO-LARGE baked')" \
-    && python -c "import sys; sys.path.insert(0, '/opt/searaft'); from sea_raft.api import load_searaft; m = load_searaft('princeton-vl/SEA-RAFT-L'); print('✓ SEA-RAFT-L baked')" \
+    && python -c "import sys; sys.path.insert(0, '/opt/searaft'); from sea_raft.api import load_searaft; m = load_searaft('MemorySlices/Tartan-C-T-TSKH-spring540x960-M'); print('✓ SEA-RAFT (Tartan-spring-M) baked')" \
     && unset HUGGING_FACE_HUB_TOKEN HF_TOKEN
 
 # Lock runtime to offline mode — Slurm compute nodes must not call HF.

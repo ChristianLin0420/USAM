@@ -11,9 +11,12 @@ here because flow precompute is per-camera-per-chunk rather than per-episode.
 
 Model
 -----
-Default checkpoint is ``princeton-vl/SEA-RAFT-L`` (Large variant). The shim at
-``/opt/searaft/sea_raft/api.py`` (baked into the prep Docker image) wraps the
-upstream ``RAFT`` class with ``PyTorchModelHubMixin``-style loading.
+Default checkpoint is ``MemorySlices/Tartan-C-T-TSKH-spring540x960-M`` (the
+Spring-finetuned medium variant, 19.7M params). The paper's L (large) variant
+was never published publicly — only S and M are available under the
+``MemorySlices`` org. The shim at ``/opt/searaft/sea_raft/api.py`` (baked into
+the prep Docker image) wraps the upstream ``RAFT`` class with
+``PyTorchModelHubMixin``-style loading.
 """
 
 from __future__ import annotations
@@ -73,8 +76,9 @@ def _load_searaft(ckpt: Optional[Union[str, Path]]):
     Parameters
     ----------
     ckpt : str | Path | None
-        Either an HF Hub model id (e.g. ``"princeton-vl/SEA-RAFT-L"``) or a
-        path to a local ``.pth`` file. ``None`` returns ``None``.
+        Either an HF Hub model id (e.g.
+        ``"MemorySlices/Tartan-C-T-TSKH-spring540x960-M"``) or a path to a
+        local ``.pth`` file. ``None`` returns ``None``.
     """
     if ckpt is None:
         return None
@@ -93,7 +97,7 @@ def compute_flow_for_chunk(
     staged_chunk_dir: Path,
     output_dir: Path,
     cameras: Iterable[str],
-    searaft_ckpt: Optional[Union[str, Path]] = "princeton-vl/SEA-RAFT-L",
+    searaft_ckpt: Optional[Union[str, Path]] = "MemorySlices/Tartan-C-T-TSKH-spring540x960-M",
     config: FlowConfig | None = None,
 ) -> List[Path]:
     """Compute per-camera flow for one chunk's worth of episodes.
@@ -107,7 +111,8 @@ def compute_flow_for_chunk(
     cameras : iterable of str
         Canonical camera keys to process (e.g. ``["head_rgb", "wrist_rgb"]``).
     searaft_ckpt : str | Path | None
-        HF Hub model id (default ``"princeton-vl/SEA-RAFT-L"``) or a path to a
+        HF Hub model id (default
+        ``"MemorySlices/Tartan-C-T-TSKH-spring540x960-M"``) or a path to a
         local checkpoint. ``None`` bypasses model load (smoke-test path).
     config : FlowConfig | None
 
@@ -229,10 +234,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--searaft-ckpt",
         type=str,
-        default="princeton-vl/SEA-RAFT-L",
+        default="MemorySlices/Tartan-C-T-TSKH-spring540x960-M",
         help="HF model id or local path for the SEA-RAFT checkpoint "
-        "(default: princeton-vl/SEA-RAFT-L). Pass an empty string to skip "
-        "model load (placeholder/smoke mode).",
+        "(default: MemorySlices/Tartan-C-T-TSKH-spring540x960-M). Pass an "
+        "empty string to skip model load (placeholder/smoke mode).",
     )
     parser.add_argument(
         "--resume",

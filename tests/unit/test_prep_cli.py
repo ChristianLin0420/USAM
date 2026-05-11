@@ -79,11 +79,17 @@ def test_source_is_deprecated_alias_for_stage_2b() -> None:
     assert "deprecated" in help_text.lower()
 
 
-def test_stage_2b_compute_flow_default_ckpt_is_sea_raft_l() -> None:
-    """The default for ``--searaft-ckpt`` must be the real SEA-RAFT-L model id."""
+def test_stage_2b_compute_flow_default_ckpt_is_sea_raft_m() -> None:
+    """The default for ``--searaft-ckpt`` must be the published SEA-RAFT M variant.
+
+    The L variant is referenced in the paper but never released publicly;
+    only S and M are on HF Hub under MemorySlices/. We default to the
+    Spring-finetuned M (best training mix among M-sized models).
+    """
     help_text = _run_help("prep.stage_2b_compute_flow")
-    assert "princeton-vl/SEA-RAFT-L" in help_text, (
-        "stage_2b's --searaft-ckpt should default to princeton-vl/SEA-RAFT-L\n"
+    assert "MemorySlices/Tartan-C-T-TSKH-spring540x960-M" in help_text, (
+        "stage_2b's --searaft-ckpt should default to "
+        "MemorySlices/Tartan-C-T-TSKH-spring540x960-M\n"
         f"got help:\n{help_text}"
     )
 
