@@ -142,26 +142,12 @@ def _enumerate_bridge(raw_root: Path) -> Iterator[_RawEpisode]:
     yield from _enumerate_local_dir("bridge", "bridge_widowx", raw_root, "*.tfrecord*")
 
 
-def _enumerate_oxe_auge(raw_root: Path) -> Iterator[_RawEpisode]:
-    if not raw_root.exists():
-        return
-    for sub in sorted(p for p in raw_root.iterdir() if p.is_dir()):
-        for shard in sorted(sub.rglob("*.tfrecord*")):
-            yield _RawEpisode(
-                episode_id=f"oxe_auge::{sub.name}::{shard.name}",
-                embodiment="oxe_auge_generic",
-                raw_path=str(shard.resolve()),
-                n_frames=0,
-            )
-
-
 _ENUMERATORS = {
     "droid": _enumerate_droid,
     "agibot2026": _enumerate_agibot,
     "rh20t": _enumerate_rh20t,
     "robomind": _enumerate_robomind,
     "bridge": _enumerate_bridge,
-    "oxe_auge": _enumerate_oxe_auge,
 }
 
 

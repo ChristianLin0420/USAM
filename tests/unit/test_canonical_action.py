@@ -6,10 +6,10 @@ Verifies that for **every** embodiment in ``prep/embodiment.json``:
     2. ``validate_action_canonical`` accepts it (bounds OK)
     3. The values are inside the documented ranges
 
-After Phase 2 there are zero stub embodiments — all six (DROID, AgiBot G1,
-RH20T, RoboMIND Tien Kung, Bridge WidowX, OXE-AugE generic) round-trip with
-real rules. The legacy "expects NotImplementedError on stubs" assertion is
-gone; the new ``test_no_phase2_stubs_remain`` flips it: zero stubs allowed.
+After Phase 2 there are zero stub embodiments — all five (DROID, AgiBot G1,
+RH20T, RoboMIND Tien Kung, Bridge WidowX) round-trip with real rules. The
+legacy "expects NotImplementedError on stubs" assertion is gone; the new
+``test_no_phase2_stubs_remain`` flips it: zero stubs allowed.
 """
 
 from __future__ import annotations
@@ -124,12 +124,12 @@ def test_registry_round_trip_every_known_embodiment() -> None:
     * ``ee_velocity_passthrough`` (DROID, Bridge): random 7-D velocity stream.
     * ``ee_pose_finite_diff`` (RH20T): smooth pose stream.
     * ``joint_position_to_ee_finite_diff`` / ``joint_delta_to_ee_finite_diff``
-      / ``manifest_per_source`` (RoboMIND, AgiBot, OXE-AugE): the converter
-      contract pre-fills cols 0..6 with canonical EE; we mirror that here.
+      (RoboMIND, AgiBot): the converter contract pre-fills cols 0..6 with
+      canonical EE; we mirror that here.
     """
     reg = load_embodiment_registry()
     assert "droid_franka" in reg
-    assert len(reg) == 6, f"expected 6 embodiments, got {sorted(reg)}"
+    assert len(reg) == 5, f"expected 5 embodiments, got {sorted(reg)}"
 
     T = 8
     for name, rule in reg.items():
@@ -141,7 +141,6 @@ def test_registry_round_trip_every_known_embodiment() -> None:
         elif rule.kind in (
             "joint_position_to_ee_finite_diff",
             "joint_delta_to_ee_finite_diff",
-            "manifest_per_source",
         ):
             # Converter pre-fills cols 0..6; pad to native_dim.
             native_dim = max(rule.native_dim, 7)
@@ -188,7 +187,7 @@ def test_rh20t_pose_diff_zero_motion_yields_zero_velocity() -> None:
 
 def test_prefilled_rules_are_passthrough_on_first_seven_columns() -> None:
     """Joint-stream rules must be a scaled passthrough on cols 0..6."""
-    for name in ("agibot_g1", "robomind_tien_kung", "oxe_auge_generic"):
+    for name in ("agibot_g1", "robomind_tien_kung"):
         reg = load_embodiment_registry()
         rule = reg[name]
         a_native = _tiny_prefilled_native(5, max(rule.native_dim, 7))

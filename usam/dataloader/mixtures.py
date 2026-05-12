@@ -45,7 +45,6 @@ DEFAULT_TIER1_MIX: List[SourceMixture] = [
     SourceMixture("rh20t", "<org>/usam-rh20t", 0.20),
     SourceMixture("robomind", "<org>/usam-robomind", 0.15),
     SourceMixture("bridge", "<org>/usam-bridge", 0.10),
-    SourceMixture("oxe_auge", "<org>/usam-oxe-auge", 0.10),
 ]
 
 

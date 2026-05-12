@@ -42,9 +42,9 @@ schedule:
   min_lr: 1.0e-5
 
 batch:
-  global_size: 1024          # 256 GPUs × 4 = 1024
-  micro_size: 4              # per-device batch
-  grad_accum: 1
+  global_size: 1024          # 256 GPUs × 4 = 1024 (H200 production)
+  micro_size: 2              # per-device batch (LDA-1B Player + bf16 AdamW fits at bs=2 on 46 GB A40)
+  grad_accum: 2              # effective per-rank bs=4 → 32 global on 8 GPUs
 
 # ---------------------------------------------------------------------------
 # Data — point at one of the per-source repos at runtime via --data.
@@ -61,7 +61,7 @@ data:
   # synthesized smoke fixture is 15 fps; the smoke test overrides this
   # in `test_smoke_train.py` by reading the fixture's info.json.
   fps_action: 30
-  num_workers: 4
+  num_workers: 0  # in-process dataloader; >0 deadlocks under torchrun + spawn ctx
 
 # ---------------------------------------------------------------------------
 # Loss weights and ramp schedule

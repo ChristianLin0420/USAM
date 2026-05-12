@@ -48,9 +48,13 @@ AGIBOT_EMBODIMENT: str = "agibot_g1"
 AGIBOT_FPS: int = 30
 AGIBOT_NATIVE_ACTION_DIM: int = 24  # bimanual: 12 per arm (7 joint + 5 hand)
 AGIBOT_CAMERA_MAP: Dict[str, str] = {
-    "head": "head_rgb",
-    "hand_left": "wrist_rgb_left",
-    "hand_right": "wrist_rgb_right",
+    # Egocentric-only mixture: drop hand_left/hand_right and use only
+    # the head-mounted view. AgiBot World 2026 ships this column under
+    # the key `top_head` (LeRobot v2.1 video tree:
+    # videos/chunk-NNN/observation.images.top_head/...). Earlier
+    # AgiBot Alpha released it as `head_color` raw mp4, but our 2026
+    # converter targets the post-LeRobot layout, so use `top_head`.
+    "top_head": "head_rgb",
 }
 
 
@@ -109,18 +113,46 @@ class AgiBot2026Converter(CheckpointedJob):
                 self.raw_root,
             )
             return iter([])
-        ep_meta = self.raw_root / "meta" / "episodes.parquet"
-        if not ep_meta.exists():
-            _LOG.warning("missing %s", ep_meta)
-            return iter([])
-        try:
-            import pyarrow.parquet as pq  # type: ignore[import-not-found]
-        except ImportError:
-            _LOG.warning("pyarrow not installed; AgiBot list_episodes empty")
-            return iter([])
-
-        table = pq.read_table(str(ep_meta), columns=["episode_index", "length"])
-        episode_indices = table.column("episode_index").to_pylist()
+        # AgiBot 2026's per-task tarballs ship `meta/` with `info.json`,
+        # `episodes.jsonl`, `episodes_stats.jsonl`, and `tasks.jsonl` —
+        # not the original `episodes.parquet`. Accept either layout so
+        # the converter works on both the full Hub mirror (parquet) and
+        # the per-task tarball extracts (jsonl).
+        ep_parquet = self.raw_root / "meta" / "episodes.parquet"
+        ep_jsonl = self.raw_root / "meta" / "episodes.jsonl"
+        episode_indices: List[int] = []
+        if ep_parquet.exists():
+            try:
+                import pyarrow.parquet as pq  # type: ignore[import-not-found]
+            except ImportError:
+                _LOG.warning("pyarrow not installed; AgiBot list_episodes empty")
+                return iter([])
+            table = pq.read_table(str(ep_parquet), columns=["episode_index", "length"])
+            episode_indices = [int(i) for i in table.column("episode_index").to_pylist()]
+        elif ep_jsonl.exists():
+            # Each line: {"episode_index": N, "tasks": [...], "length": ...}
+            with open(ep_jsonl, "r") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                        episode_indices.append(int(row["episode_index"]))
+                    except (json.JSONDecodeError, KeyError, ValueError):
+                        continue
+        else:
+            # Last resort: scan the data/ tree for episode_NNNNNN.parquet files.
+            _LOG.warning(
+                "no meta/episodes.{parquet,jsonl} at %s; falling back to data/ glob",
+                self.raw_root / "meta",
+            )
+            for p in sorted((self.raw_root / "data").rglob("episode_*.parquet")):
+                stem = p.stem  # episode_NNNNNN
+                try:
+                    episode_indices.append(int(stem.split("_")[-1]))
+                except ValueError:
+                    continue
         # Stable shard assignment: every Nth episode goes to chunk N.
         my_eps = [int(i) for i in episode_indices if int(i) % 256 == self.chunk]
         refs: List[EpisodeRef] = []
@@ -213,17 +245,25 @@ class AgiBot2026Converter(CheckpointedJob):
         state_mask = np.zeros((50,), dtype=bool)
         state_mask[:d_state] = True
 
-        # Cameras: AgiBot 2026 stores each camera as a column of mp4 paths.
-        # The actual frame extraction lives in the encoder stage; here we
-        # produce empty arrays and leave the camera names so stage_2c knows
-        # which mp4s to read. If a downstream caller needs decoded frames they
-        # come through ``raw_meta``.
+        # Cameras: AgiBot 2026 stores each camera as
+        # ``videos/chunk-NNN/observation.images.<cam>/episode_NNNNNN.mp4``.
+        # The parquet's column is metadata (e.g. fps + path) — we ignore
+        # those rows and decode the mp4 directly so stage_2c/4 see the
+        # standard ``camera_<cam>.npy`` staged layout.
         cameras: Dict[str, np.ndarray] = {}
+        chunk_dir = f"chunk-{ep_idx // 1000:03d}"
         for src_key, dst_key in AGIBOT_CAMERA_MAP.items():
-            video_col = f"observation.images.{src_key}"
-            if video_col not in cols:
+            mp4 = (
+                self.raw_root / "videos" / chunk_dir
+                / f"observation.images.{src_key}" / f"episode_{ep_idx:06d}.mp4"
+            )
+            if not mp4.exists():
+                _LOG.debug("missing AgiBot mp4 %s (skipping cam)", mp4)
                 continue
-            cameras[dst_key] = np.zeros((0, 0, 0, 0), dtype=np.uint8)
+            frames = self._decode_mp4(mp4, max_frames=T)
+            if frames is None or frames.shape[0] == 0:
+                continue
+            cameras[dst_key] = frames
 
         # Canonical action via stage_3 (passthrough on the pre-filled 7 cols).
         action_canonical_ee = canonicalize_action(action_native, AGIBOT_EMBODIMENT)
@@ -261,6 +301,72 @@ class AgiBot2026Converter(CheckpointedJob):
         )
 
     # ----- AgiBot specifics ----------------------------------------------
+
+    @staticmethod
+    def _decode_mp4(path: Path, max_frames: Optional[int] = None) -> Optional[np.ndarray]:
+        """Decode an mp4 to ``[T, H, W, 3] uint8`` RGB.
+
+        AgiBot 2026 mp4s use the AV1 codec; decord/cv2 autodetect the wrong
+        decoder and silently fail with "Missing Sequence Header". We force
+        ``libdav1d`` via an ffmpeg subprocess that streams rawvideo over
+        stdout — one call decodes the whole episode and a single numpy
+        reshape gives us the [T, H, W, 3] array. Non-AV1 codecs work too
+        (libdav1d gracefully falls back through ffmpeg's stream copy).
+        """
+        import subprocess
+
+        # 1. Probe dimensions + frame count (cheap, single ffprobe call).
+        try:
+            probe = subprocess.run(
+                [
+                    "ffprobe", "-v", "error", "-select_streams", "v:0",
+                    "-show_entries", "stream=width,height,nb_frames,codec_name",
+                    "-of", "csv=p=0",
+                    str(path),
+                ],
+                capture_output=True, text=True, timeout=30, check=True,
+            )
+            parts = probe.stdout.strip().split(",")
+            codec_name, w, h, nb = parts[0], int(parts[1]), int(parts[2]), parts[3]
+            n_total = int(nb) if nb.isdigit() else 0
+        except Exception as e:
+            _LOG.error("ffprobe failed for %s: %s", path, e)
+            return None
+
+        n = min(n_total, int(max_frames)) if max_frames and n_total else n_total
+        if n == 0:
+            # Some containers omit nb_frames; just decode all and reshape.
+            n = -1
+
+        # 2. Stream raw RGB out of ffmpeg. Force libdav1d for AV1 streams,
+        #    otherwise let ffmpeg autodetect.
+        codec_flag: List[str] = []
+        if codec_name == "av1":
+            codec_flag = ["-c:v", "libdav1d"]
+        cmd = [
+            "ffmpeg", "-v", "error", *codec_flag, "-i", str(path),
+        ]
+        if n > 0:
+            cmd += ["-frames:v", str(n)]
+        cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=600, check=True)
+        except subprocess.CalledProcessError as e:
+            _LOG.error("ffmpeg decode failed for %s: %s", path, e.stderr.decode(errors="ignore")[:300])
+            return None
+
+        nbytes = len(proc.stdout)
+        bytes_per_frame = h * w * 3
+        if nbytes % bytes_per_frame != 0:
+            _LOG.error(
+                "ffmpeg output size %d not divisible by frame size %d (%s)",
+                nbytes, bytes_per_frame, path,
+            )
+            return None
+        actual_n = nbytes // bytes_per_frame
+        frames = np.frombuffer(proc.stdout, dtype=np.uint8).reshape(actual_n, h, w, 3)
+        return np.ascontiguousarray(frames)
 
     def _compute_ee_velocity(self, cols: Dict[str, np.ndarray], T: int) -> np.ndarray:
         """Extract right-arm EE pose from state and finite-difference to velocity.

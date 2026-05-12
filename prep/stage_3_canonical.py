@@ -226,26 +226,11 @@ def _canon_joint_delta_to_ee_finite_diff(
     return _canon_joint_position_to_ee_finite_diff(action_native, params)
 
 
-def _canon_manifest_per_source(
-    action_native: np.ndarray, params: Mapping[str, object]
-) -> np.ndarray:
-    """OXE-AugE rule: per-sub-source manifest selects the format.
-
-    For mixed collections we cannot dispatch by embodiment string alone — the
-    OXE-AugE manifest carries a per-source action_format that the converter
-    consumed to pre-fill the first 7 padded columns. Stage_3 therefore reads
-    those 7 columns directly. Same passthrough contract as the joint-stream
-    rules above.
-    """
-    return _canon_joint_position_to_ee_finite_diff(action_native, params)
-
-
 _KIND_DISPATCH: Dict[str, Callable[[np.ndarray, Mapping[str, object]], np.ndarray]] = {
     "ee_velocity_passthrough": _canon_ee_velocity_passthrough,
     "ee_pose_finite_diff": _canon_ee_pose_finite_diff,
     "joint_position_to_ee_finite_diff": _canon_joint_position_to_ee_finite_diff,
     "joint_delta_to_ee_finite_diff": _canon_joint_delta_to_ee_finite_diff,
-    "manifest_per_source": _canon_manifest_per_source,
 }
 
 
@@ -341,13 +326,13 @@ def main(argv: list[str] | None = None) -> int:
     ds = parser.add_mutually_exclusive_group(required=True)
     ds.add_argument(
         "--dataset",
-        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
         help="Source name (one A100 node per dataset).",
     )
     ds.add_argument(
         "--source",
         dest="dataset",
-        choices=("droid", "bridge", "agibot2026", "oxe_auge", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
         help="(deprecated) use --dataset",
     )
     parser.add_argument("--chunk", required=True, type=int)
@@ -377,7 +362,6 @@ def main(argv: list[str] | None = None) -> int:
         "droid": "droid_franka",
         "bridge": "bridge_widowx",
         "agibot2026": "agibot_g1",
-        "oxe_auge": "oxe_mixed",
         "rh20t": "rh20t_franka",
         "robomind": "robomind_franka",
     }

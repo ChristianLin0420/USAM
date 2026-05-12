@@ -34,8 +34,11 @@ BRIDGE_EMBODIMENT: str = "bridge_widowx"
 BRIDGE_FPS: int = 5
 BRIDGE_NATIVE_ACTION_DIM: int = 7
 BRIDGE_CAMERA_MAP: Dict[str, str] = {
+    # Egocentric-only mixture: drop wrist_rgb. The model is trained on
+    # head_rgb across all Tier-1 sources to keep the visual prior
+    # consistent and match the egocentric human datasets (Ego4D etc.)
+    # that we're mixing in. See docs/IMPLEMENTATION_PLAN.md §5.
     "image_0": "head_rgb",
-    "image_2": "wrist_rgb",
 }
 
 
@@ -80,7 +83,11 @@ class BridgeConverter(CheckpointedJob):
             _LOG.warning("tensorflow_datasets not installed; Bridge enumeration empty")
             return iter([])
 
-        builder = tfds.builder("bridge", data_dir=self.rlds_data_dir)
+        # The actual BridgeData V2 RLDS is registered as `bridge_data_v2`
+        # in TFDS; the legacy `bridge` builder points at v1 (different
+        # feature schema, missing `episode_metadata/episode_id`) and trips
+        # an `InvalidArgumentError` on first iteration.
+        builder = tfds.builder("bridge_data_v2", data_dir=self.rlds_data_dir)
         n_total = int(builder.info.splits["train"].num_examples)
         # Stable shard assignment: every 256th episode goes to chunk N.
         my_indices = [i for i in range(n_total) if i % 256 == self.chunk]
@@ -106,7 +113,11 @@ class BridgeConverter(CheckpointedJob):
             ) from e
 
         ep_idx = int(ref.extra["episode_index"])
-        builder = tfds.builder("bridge", data_dir=self.rlds_data_dir)
+        # The actual BridgeData V2 RLDS is registered as `bridge_data_v2`
+        # in TFDS; the legacy `bridge` builder points at v1 (different
+        # feature schema, missing `episode_metadata/episode_id`) and trips
+        # an `InvalidArgumentError` on first iteration.
+        builder = tfds.builder("bridge_data_v2", data_dir=self.rlds_data_dir)
         ds = builder.as_dataset(split=f"train[{ep_idx}:{ep_idx + 1}]")
         for tf_episode in ds.take(1):
             return self._tf_episode_to_result(tf_episode, ref)

@@ -49,6 +49,7 @@ import argparse
 import logging
 import math
 import os  # used by maybe_wrap_distributed (RANK/WORLD_SIZE env probe)
+import sys  # used by _maybe_init_wandb to defeat cwd `wandb/` namespace-package shadowing
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -288,12 +289,21 @@ def build_dataloader(
         fps_action=fps_action,
     )
 
+    # Use 'spawn' start method when num_workers > 0 to avoid fork-after-CUDA
+    # deadlocks: with `torch.cuda.set_device(LOCAL_RANK)` called early in run(),
+    # the main process already has a CUDA context; forked workers inherit
+    # corrupted CUDA state and hang on the first cudaMalloc.
+    import multiprocessing as _mp
     return DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         collate_fn=_collate,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
+        multiprocessing_context=_mp.get_context("spawn") if num_workers > 0 else None,
         drop_last=False,
     )
 
@@ -361,11 +371,30 @@ def build_base_loss_weights(cfg: Dict[str, Any]) -> tuple[LossWeights, float]:
 # ---------------------------------------------------------------------------
 def build_model_from_cfg(model_cfg: Dict[str, Any]) -> USAMTrainModel:
     """Convert a model YAML's ``encoder`` / ``player`` / ``conductor`` keys
-    into :class:`_USAMTrainConfig` and instantiate the model."""
+    into :class:`_USAMTrainConfig` and instantiate the model.
+
+    The ``player.action_model_type`` field switches between the smoke
+    Transformer stub (``DiT-B``, ``DiT-S``, or absent) and the real
+    LDA-1B MM-DiT (``DiT-L``, ``DiT-XL``). The smoke path keeps
+    backwards-compat with the existing integration tests; the LDA path
+    instantiates the full ``MMDiT`` from ``lda/...``.
+    """
     encoder = model_cfg.get("encoder", {})
     player = model_cfg.get("player", {})
     conductor = model_cfg.get("conductor", {})
     action_head = model_cfg.get("action_head", {})
+
+    # Switch to the real LDA-1B Player whenever the YAML asks for DiT-L
+    # or DiT-XL. Anything else stays on the smoke Transformer.
+    action_model_type = str(player.get("action_model_type", "DiT-B")).upper()
+    use_lda_player = action_model_type in {"DIT-L", "DIT-XL"}
+
+    # DiT preset → (input_embedding_dim, attention_head_dim, num_attention_heads)
+    dit_preset = {
+        "DIT-B": (768, 64, 12),
+        "DIT-L": (1536, 48, 32),
+        "DIT-XL": (2048, 64, 32),
+    }.get(action_model_type, (768, 64, 12))
 
     cfg = _USAMTrainConfig(
         hidden_size=int(player.get("hidden_size", 256)),
@@ -381,6 +410,14 @@ def build_model_from_cfg(model_cfg: Dict[str, Any]) -> USAMTrainModel:
         e_proj_dim=64,  # locked: matches Conductor.e_proj_dim default
         backbone_hidden=64,  # mock backbone dim
         backbone_seq_len=64,
+        use_lda_player=use_lda_player,
+        mmdit_input_embedding_dim=int(player.get("input_embedding_dim", dit_preset[0])),
+        mmdit_attention_head_dim=dit_preset[1],
+        mmdit_num_attention_heads=dit_preset[2],
+        mmdit_output_dim=int(player.get("output_dim", encoder.get("embed_dim", 1024))),
+        mmdit_num_register_tokens=int(player.get("num_target_vision_tokens", 32)),
+        mmdit_enable_depth_head=bool(player.get("enable_depth_head", True)),
+        mmdit_enable_proprio_cond=bool(player.get("enable_proprio_cond", True)),
     )
     # Cap action_dim at 7 — production canonical EE is 7-D; our smoke
     # player was sized for that and the dataloader pads beyond it.
@@ -567,7 +604,9 @@ def train_loop(
         # Note: `apply_cache_dropout(cache, t)` is invoked inside
         # `model.training_step` immediately after the Conductor refresh —
         # see usam._train_helpers.USAMTrainModel._refresh_plan_cache.
-        total_loss, per_loss = model.training_step(batch, weights, step)
+        # Unwrap DDP if needed — DDP only forwards forward(), not arbitrary methods.
+        inner = model.module if hasattr(model, "module") else model
+        total_loss, per_loss = inner.training_step(batch, weights, step)
 
         if not torch.isfinite(total_loss):
             raise RuntimeError(f"Non-finite loss at step {step}: {total_loss.item()}")
@@ -582,14 +621,35 @@ def train_loop(
         optimizer.step()
         scheduler.step()
 
-        loss_val = float(total_loss.detach().item())
+        # All-reduce per-step loss values across DDP ranks so the printed /
+        # logged scalars reflect the **global** mean across the 8 shards,
+        # not just rank-0's local view. Gradients are already averaged by
+        # DDP during backward(); this all_reduce is for monitoring only.
+        # Only rank 0 emits the log line (suppress other ranks).
+        is_dist = (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        rank0 = (int(os.environ.get("RANK", "0")) == 0) if is_dist else True
+
+        def _reduce(t: torch.Tensor) -> torch.Tensor:
+            if not is_dist:
+                return t
+            t = t.detach().clone()
+            torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.AVG)
+            return t
+
+        total_reduced = _reduce(total_loss)
+        per_loss_reduced = {k: _reduce(v) for k, v in per_loss.items()}
+
+        loss_val = float(total_reduced.item())
         losses.append(loss_val)
         step_time_ms = (time.time() - step_t0) * 1000.0
         cur_lr = scheduler.get_last_lr()[0]
 
-        if (step % log_every == 0) or (step == max_steps - 1):
+        if rank0 and ((step % log_every == 0) or (step == max_steps - 1)):
             per_str = " ".join(
-                f"{k}={float(v.detach().item()):.4f}" for k, v in per_loss.items()
+                f"{k}={float(v.item()):.4f}" for k, v in per_loss_reduced.items()
             )
             logger.info("step=%d loss=%.4f lr=%.3e %s",
                         step, loss_val, cur_lr, per_str)
@@ -597,12 +657,12 @@ def train_loop(
         # ---- wandb (soft) ----
         if wandb_run is not None:
             log_payload: Dict[str, Any] = {
-                "loss/total": loss_val,
+                "loss/total": loss_val,  # global (all-reduced) mean across ranks
                 "lr": cur_lr,
                 "step_time_ms": step_time_ms,
             }
-            for k, v in per_loss.items():
-                log_payload[f"loss/{k}"] = float(v.detach().item())
+            for k, v in per_loss_reduced.items():
+                log_payload[f"loss/{k}"] = float(v.item())
             for k, v in weights.as_dict().items():
                 log_payload[f"weight/{k}"] = float(v)
             if grad_norm is not None:
@@ -685,10 +745,28 @@ def _maybe_init_wandb(
     if not os.environ.get("WANDB_API_KEY"):
         logger.info("WANDB_API_KEY not set; skipping wandb init (stdout logging only)")
         return None
+    # Defensive: when the current working directory contains a `wandb/`
+    # subdir (left over from a prior run's logs), Python treats it as a
+    # namespace package on first `import wandb`, shadowing the installed
+    # library — `wandb.init` then "doesn't exist". Force the site-packages
+    # entry to the front so the real wheel wins.
     try:
+        import site
+        for sp in site.getsitepackages():
+            if sp not in sys.path[:1]:
+                sys.path.insert(0, sp)
+        # Remove any stale, half-imported `wandb` module that may already
+        # be the empty namespace package.
+        if "wandb" in sys.modules and getattr(sys.modules["wandb"], "__file__", None) is None:
+            del sys.modules["wandb"]
         import wandb  # type: ignore
-    except ImportError:
-        logger.warning("wandb not installed; skipping wandb init")
+        if not hasattr(wandb, "init"):
+            raise ImportError(
+                f"wandb module loaded as namespace package (cwd={Path.cwd()}); "
+                "check for a `wandb/` directory in the working tree."
+            )
+    except ImportError as e:
+        logger.warning("wandb not installed or shadowed by cwd dir; skipping wandb init: %s", e)
         return None
     try:
         run = wandb.init(
@@ -743,6 +821,15 @@ def run(
     """High-level run helper. Used by both the CLI and the integration test."""
     torch.manual_seed(args.seed)
 
+    # Pin this rank to its assigned GPU BEFORE any tensor / model allocation.
+    # Without this, every torchrun rank defaults to cuda:0 (leaking ~482 MB
+    # PyTorch + NCCL context per rank), bloating GPU 0 to ~5 GB on an 8-rank
+    # node. Setting the device early forces cuda:LOCAL_RANK from the start.
+    import os as _os
+    _local_rank = int(_os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available() and args.device != "cpu":
+        torch.cuda.set_device(_local_rank)
+
     # ------------------------------------------------------------------
     # Device / precision detection
     # ------------------------------------------------------------------
@@ -751,6 +838,9 @@ def run(
     logger.info("Precision plan: %s", plan.note)
     if args.device == "cuda" and plan.device_type != "cuda":
         raise RuntimeError("--device cuda requested but CUDA is not available.")
+    # `torch.cuda.set_device(LOCAL_RANK)` above means `torch.device("cuda")`
+    # now resolves to cuda:LOCAL_RANK implicitly. Keep the plain "cuda" form
+    # so Accelerator's `prepare()` doesn't get confused by an explicit index.
     device = torch.device(plan.device_type)
     weights_dtype = plan.weights_dtype
 
@@ -770,7 +860,11 @@ def run(
         batch_size = min(batch_size, 1)
 
     # Bound to the dataset size so tiny fixtures don't OOM.
-    loader = build_dataloader(data_root, batch_size, train_cfg, num_workers=0)
+    # num_workers from config (default 4) — overridden to 0 only on CPU to keep
+    # the unit-test plumbing trivially deterministic.
+    cfg_num_workers = int(train_cfg.get("data", {}).get("num_workers", 4))
+    nw = 0 if plan.device_type == "cpu" else cfg_num_workers
+    loader = build_dataloader(data_root, batch_size, train_cfg, num_workers=nw)
     if len(loader.dataset) == 0:  # pragma: no cover - defensive
         raise RuntimeError(f"empty dataset at {data_root}")
 
@@ -841,7 +935,7 @@ def run(
         new_bs = max(1, batch_size // 2)
         logger.warning("OOM at bs=%d, retrying at bs=%d. Original: %s",
                        batch_size, new_bs, e)
-        loader = build_dataloader(data_root, new_bs, train_cfg, num_workers=0)
+        loader = build_dataloader(data_root, new_bs, train_cfg, num_workers=nw)
         return train_loop(
             model=model,
             optimizer=optimizer,

@@ -88,23 +88,6 @@
         "gripper": [0.0, 1.0]
       },
       "fps": 5
-    },
-    "oxe_auge_generic": {
-      "kind": "manifest_per_source",
-      "native_dim": 32,
-      "ee_dim": 7,
-      "comment": "OXE-AugE is a meta-collection. The per-source canonicalization is selected from the manifest `action_format` field (one of: ee_velocity_passthrough, ee_pose_finite_diff, joint_position_to_ee_finite_diff). The first 7 padded columns of action_native are reserved for the canonical EE channel; the converter pre-fills them so stage_3 is a passthrough.",
-      "indices": {
-        "linear_velocity_xyz": [0, 1, 2],
-        "angular_velocity_xyz": [3, 4, 5],
-        "gripper": 6
-      },
-      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-      "bounds": {
-        "linear_velocity": [-2.0, 2.0],
-        "angular_velocity": [-3.141592653589793, 3.141592653589793],
-        "gripper": [0.0, 1.0]
-      }
     }
   }
 }

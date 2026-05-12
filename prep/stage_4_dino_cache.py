@@ -53,7 +53,7 @@ class DinoCacheConfig:
     target_hw: tuple[int, int] = (448, 448)
     n_keep_tokens: int = 64
     embed_dim: int = 768
-    batch_size: int = 16
+    batch_size: int = 128  # bumped from 16; DINOv3-ViT-L fp16 at bs=128 ≈ 4 GB VRAM
     cache_fps: int = 5
     fp16: bool = True
 
@@ -252,11 +252,16 @@ def _encode_chunk_worker(
     dinov3_arch: str,
     source_fps: int,
     config_kwargs: dict,
+    num_physical_gpus: int = 0,
 ) -> None:
     """torch.multiprocessing.spawn entry point.
 
     Pinned to one GPU; loads its own DINOv3; processes only the episodes
     owned by ``rank``; writes ``file-{rank:03d}.safetensors`` per (cam, mod).
+
+    When ``num_physical_gpus > 0`` and ``world_size > num_physical_gpus``,
+    multiple workers share each physical GPU via ``rank % num_physical_gpus``.
+    DINOv3 ViT-L is ~1.5 GB at inference; 4 instances easily fit on a 46 GB A40.
     """
     import logging as _logging
     _logging.basicConfig(level=_logging.INFO,
@@ -268,7 +273,8 @@ def _encode_chunk_worker(
     # the parent process has already initialized CUDA in some PyTorch builds.
     import torch as _torch
     if _torch.cuda.is_available():
-        _torch.cuda.set_device(rank)
+        n_phys = num_physical_gpus if num_physical_gpus > 0 else _torch.cuda.device_count()
+        _torch.cuda.set_device(rank % max(n_phys, 1))
 
     view_dir = _shard_episodes_by_rank(
         Path(staged_chunk_dir),
@@ -316,12 +322,15 @@ def encode_chunk_multigpu(
     source_fps: int = 30,
     world_size: int = 0,
     config: DinoCacheConfig | None = None,
+    workers_per_gpu: int = 1,
 ) -> None:
-    """Run :func:`encode_chunk` sharded across ``world_size`` GPUs via
+    """Run :func:`encode_chunk` sharded across ``world_size`` workers via
     ``torch.multiprocessing.spawn``.
 
-    * ``world_size=0`` (default) auto-detects ``torch.cuda.device_count()``
-      and falls back to 1 if no CUDAs are visible.
+    * ``world_size=0`` (default) auto-detects ``num_physical_gpus * workers_per_gpu``.
+    * ``workers_per_gpu > 1`` oversubscribes each physical GPU with that many
+      DINOv3 inference streams — useful since ViT-L is only ~1.5 GB and an
+      A40/A100 has 46 / 80 GB. Each worker still pins to ``rank % num_gpus``.
     * Each rank handles episodes ``ep_idx % world_size == rank``.
     * Each rank writes ``file-{rank:03d}.safetensors`` per (cam, mod).
 
@@ -329,8 +338,9 @@ def encode_chunk_multigpu(
     disk autonomously; callers should glob ``output_root/.../chunk-*/file-*.safetensors``.
     """
     import torch as _torch
+    num_physical_gpus = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
     if world_size <= 0:
-        world_size = _torch.cuda.device_count() if _torch.cuda.is_available() else 1
+        world_size = max(num_physical_gpus * max(workers_per_gpu, 1), 1)
     cfg = config or DinoCacheConfig()
     config_kwargs = dict(
         target_hw=cfg.target_hw,
@@ -355,6 +365,7 @@ def encode_chunk_multigpu(
             dinov3_arch=dinov3_arch,
             source_fps=source_fps,
             config_kwargs=config_kwargs,
+            num_physical_gpus=num_physical_gpus,
         )
         return
 
@@ -371,6 +382,7 @@ def encode_chunk_multigpu(
             dinov3_arch,
             source_fps,
             config_kwargs,
+            num_physical_gpus,
         ),
         nprocs=world_size,
         join=True,
@@ -426,11 +438,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="Source video FPS; cache stride is computed from this.")
     parser.add_argument("--num-gpus", type=int, default=0,
                         help="0 = auto-detect torch.cuda.device_count().")
+    parser.add_argument("--workers-per-gpu", type=int, default=1,
+                        help="Inference workers per physical GPU. >1 oversubscribes the GPU "
+                             "(ViT-L is only ~1.5 GB at inference; A40 fits 4-8 workers).")
     parser.add_argument("--target-h", type=int, default=448)
     parser.add_argument("--target-w", type=int, default=448)
     parser.add_argument("--n-keep-tokens", type=int, default=64)
     parser.add_argument("--embed-dim", type=int, default=1024)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--cache-fps", type=int, default=5)
     args = parser.parse_args(argv)
 
@@ -444,14 +459,23 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         cache_fps=args.cache_fps,
     )
+    # If --num-gpus is left at 0 (auto), use physical_gpu_count * workers_per_gpu.
+    # If user passed an explicit --num-gpus, that becomes the world_size directly.
+    if args.num_gpus > 0:
+        world_size = args.num_gpus
+    else:
+        import torch as _torch
+        _phys = _torch.cuda.device_count() if _torch.cuda.is_available() else 0
+        world_size = max(_phys * args.workers_per_gpu, 1)
     encode_chunk_multigpu(
         staged_chunk_dir=chunk_dir,
         output_root=args.output_root / args.dataset,
         dinov3_ckpt=Path(args.dinov3_ckpt),
         dinov3_arch=args.dinov3_arch,
         source_fps=args.source_fps,
-        world_size=args.num_gpus,
+        world_size=world_size,
         config=cfg,
+        workers_per_gpu=args.workers_per_gpu,
     )
     return 0
 

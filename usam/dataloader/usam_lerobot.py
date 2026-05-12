@@ -119,21 +119,23 @@ def _load_episode_frames(root: Path, ep: _EpisodeMeta) -> Dict[str, np.ndarray]:
     if not shard.exists():
         raise FileNotFoundError(f"missing parquet shard {shard}")
 
+    # Push the episode filter into the parquet reader so we deserialize only
+    # the rows we need. Without this, every cold __getitem__ does
+    # `to_pylist()` over the entire shard (450+ episodes × 13 cols ≈ 11 s),
+    # which is what made the dataloader the per-step bottleneck.
     try:
         import pyarrow.parquet as pq  # type: ignore
 
-        tbl = pq.read_table(str(shard))
+        tbl = pq.read_table(
+            str(shard),
+            filters=[("episode_index", "=", int(ep.episode_index))],
+        )
         df_dict = {col: tbl.column(col).to_pylist() for col in tbl.column_names}
     except Exception:  # pragma: no cover
         import pandas as pd  # type: ignore
 
-        df = pd.read_parquet(shard)
+        df = pd.read_parquet(shard, filters=[("episode_index", "=", int(ep.episode_index))])
         df_dict = {col: df[col].tolist() for col in df.columns}
-
-    # Each row may contain multiple episodes; filter by episode_index.
-    if "episode_index" in df_dict:
-        keep = [i for i, e in enumerate(df_dict["episode_index"]) if int(e) == ep.episode_index]
-        df_dict = {col: [vals[i] for i in keep] for col, vals in df_dict.items()}
     return _vectorize_columns(df_dict)
 
 

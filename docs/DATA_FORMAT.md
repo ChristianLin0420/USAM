@@ -80,8 +80,7 @@ described in §3 below.
 >   used by the Stage 1 / Stage 6 plumbing. The richer dataclass above is
 >   the one shipped by every source converter
 >   (`prep/stage_2a_to_lerobot/droid.py:49-69` and re-imported by
->   `agibot2026.py`, `rh20t.py`, `robomind.py`, `bridge.py`,
->   `oxe_auge.py`).
+>   `agibot2026.py`, `rh20t.py`, `robomind.py`, `bridge.py`).
 > * `EpisodeRef` likewise has two shapes in the codebase
 >   (`prep/_base.py:89-115` exposes `episode_id, source, raw_path,
 >   extra`; the per-source converters use `episode_index, source,
@@ -205,15 +204,6 @@ file for the binding behavior.
   Canonicalization rule = `ee_velocity_passthrough`.
   ↳ `prep/stage_2a_to_lerobot/bridge.py:1-39`.
 
-* **OXE-AugE** — meta-collection of 50+ RLDS sub-sources. Sub-sources
-  without an ego/head camera are dropped. Per-sub-source action
-  canonicalization is selected from the manifest's `action_format`
-  field (one of `ee_velocity`, `ee_pose`, `joint_pos`); the converter
-  pre-fills the first 7 padded columns of `action_native` with the
-  resulting canonical stream so Stage 3 is a passthrough on those seven
-  columns.
-  ↳ `prep/stage_2a_to_lerobot/oxe_auge.py:1-60`.
-
 ---
 
 ## 7. Cache layout
@@ -242,8 +232,8 @@ DataLoader workers, no per-worker duplication.
 
 ## 8. Action canonicalization
 
-The 6 supported embodiment keys (registered at
-`prep/embodiment.json:4-109`) and their canonicalization rule names:
+The 5 supported embodiment keys (registered at
+`prep/embodiment.json`) and their canonicalization rule names:
 
 | Embodiment | Native dim | Rule |
 |---|---|---|
@@ -252,15 +242,14 @@ The 6 supported embodiment keys (registered at
 | `rh20t_franka` | 7 | `ee_pose_finite_diff` |
 | `robomind_tien_kung` | 14 | `joint_position_to_ee_finite_diff` |
 | `bridge_widowx` | 7 | `ee_velocity_passthrough` |
-| `oxe_auge_generic` | 32 | `manifest_per_source` |
 
 The canonical EE frame is **7-D**:
 `[lin_vel_xyz (m/s), ang_vel_xyz (rad/s), gripper (0=open, 1=closed)]`,
 with bounds `[-2, 2]`, `[-π, π]`, `[0, 1]` enforced by the validation
-gate. The five rule names recognized by `prep.stage_3_canonical` are:
+gate. The four rule names recognized by `prep.stage_3_canonical` are:
 `ee_velocity_passthrough`, `ee_pose_finite_diff`,
-`joint_delta_to_ee_finite_diff`, `joint_position_to_ee_finite_diff`, and
-`manifest_per_source`. Extending USAM to a new embodiment is a single
+`joint_delta_to_ee_finite_diff`, and `joint_position_to_ee_finite_diff`.
+Extending USAM to a new embodiment is a single
 JSON entry plus (if a new rule name is needed) the corresponding
 implementation in `prep/stage_3_canonical.py`.
 

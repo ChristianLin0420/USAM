@@ -28,10 +28,6 @@ import pytest
 from prep._base import EpisodeRef
 from prep.stage_2a_to_lerobot.agibot2026 import AgiBot2026Converter, AGIBOT_FPS
 from prep.stage_2a_to_lerobot.bridge import BridgeConverter, BRIDGE_FPS
-from prep.stage_2a_to_lerobot.oxe_auge import (
-    OxeAugeConverter,
-    OxeAugeSubSource,
-)
 from prep.stage_2a_to_lerobot.rh20t import (
     RH20TConverter,
     RH20T_FPS,
@@ -329,89 +325,3 @@ def test_bridge_tf_episode_to_result_via_synthetic_steps(tmp_path: Path) -> None
     assert "wrist_rgb" in result.cameras
 
 
-# ---------------------------------------------------------------------------
-# OXE-AugE
-# ---------------------------------------------------------------------------
-
-
-def test_oxe_auge_rejects_no_ego_camera(tmp_path: Path) -> None:
-    out = _make_tmp_dir(tmp_path, "oxe_out")
-    manifest = {
-        "no_ego_source": OxeAugeSubSource(
-            name="no_ego_source",
-            action_format="ee_velocity",
-            fps=10,
-            has_ego_camera=False,
-            camera_map={},
-        )
-    }
-    with pytest.raises(ValueError, match="no ego camera"):
-        OxeAugeConverter(
-            chunk=0, output_root=out, sub_source="no_ego_source", manifest=manifest
-        )
-
-
-def test_oxe_auge_action_to_canonical_velocity_ee_pose() -> None:
-    entry = OxeAugeSubSource(
-        name="kuka",
-        action_format="ee_pose",
-        fps=10,
-        has_ego_camera=True,
-        camera_map={"image": "head_rgb"},
-    )
-    T = 6
-    a = np.zeros((T, 7), dtype=np.float32)
-    a[:, 0] = np.linspace(0, 0.05, T)  # pos x sweep
-    a[:, 6] = 0.5  # gripper
-    canon = OxeAugeConverter._action_to_canonical_velocity(a, entry)
-    assert canon.shape == (T, 7)
-    # Constant velocity along x.
-    assert canon[0, 0] > 0.0
-    assert np.allclose(canon[0, 6], 0.5)
-
-
-def test_oxe_auge_tf_episode_to_result_synthetic(tmp_path: Path) -> None:
-    out = _make_tmp_dir(tmp_path, "oxe_out")
-    manifest = {
-        "fake_ds": OxeAugeSubSource(
-            name="fake_ds",
-            action_format="ee_velocity",
-            fps=10,
-            has_ego_camera=True,
-            camera_map={"image": "head_rgb"},
-        )
-    }
-    conv = OxeAugeConverter(
-        chunk=0, output_root=out, sub_source="fake_ds", manifest=manifest
-    )
-    T = 4
-
-    class _StepIterable:
-        def __init__(self, steps):
-            self._steps = steps
-
-        def as_numpy_iterator(self):
-            return iter(self._steps)
-
-    steps = [
-        {
-            "observation": {
-                "image": np.full((4, 4, 3), 200, dtype=np.uint8),
-                "state": np.zeros(7, dtype=np.float32),
-            },
-            "action": np.array([0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5], dtype=np.float32),
-            "language_instruction": b"do the thing",
-        }
-        for _ in range(T)
-    ]
-    tf_episode = {"steps": _StepIterable(steps)}
-    ref = EpisodeRef(
-        episode_id="oxe_test",
-        source="oxe_auge",
-        raw_path="",
-        extra={"episode_index": 1, "sub_source": "fake_ds"},
-    )
-    result = conv._tf_episode_to_result(tf_episode, ref)
-    validate_action_canonical(result.action_canonical_ee)
-    assert "head_rgb" in result.cameras
-    assert result.embodiment == "oxe_auge_generic"

@@ -37,6 +37,9 @@ class Rotary3D(nn.Module):
     def forward(self, x, time_interval=None):
         # x: (B, T, H, W, C)
         B, T, H, W, C = x.shape
+        in_dtype = x.dtype  # preserve bf16/fp16 callers — the float32 frequency
+        # buffers below would otherwise promote the output and break the next
+        # nn.Linear that expects matching dtype.
 
         # time
         if time_interval is None:
@@ -72,7 +75,7 @@ class Rotary3D(nn.Module):
         x_w = (x_w * cos_w) + (rotate_half(x_w) * sin_w)
 
         x = torch.cat([x_t, x_h, x_w], dim=-1)
-        return x
+        return x.to(in_dtype)
 
 
 # -----------------------------
@@ -93,6 +96,7 @@ class Rotary1D(nn.Module):
     def forward(self, x, time_interval=None):
         # x: (B, L, C)
         B, L, C = x.shape
+        in_dtype = x.dtype
         if time_interval is None:
             seq = torch.arange(L, device=x.device).float()
         else:
@@ -103,7 +107,7 @@ class Rotary1D(nn.Module):
         sin = sin[None, :, :]
         cos = cos[None, :, :]
         x = (x * cos) + (rotate_half(x) * sin)
-        return x
+        return x.to(in_dtype)
 
 
 # -----------------------------

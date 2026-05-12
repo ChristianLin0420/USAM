@@ -65,13 +65,7 @@ Real-download path (run manually, not from CI):
        --include "RH20T_cfg1/scene_00*/folder_00{0..2}/*" \\
        --local-dir tests/golden_data/raw/rh20t
 
-   # 7. OXE-AugE — first 3 episodes (kuka subset, illustrative).
-   huggingface-cli download \\
-       jxu124/OpenX-Embodiment \\
-       --include "kuka/0.1.0/kuka-train.tfrecord-0000{0..2}-of-*" \\
-       --local-dir tests/golden_data/raw/oxe_auge
-
-   # 8. Run the converters + Phase A.4 DINO cache against the raw slices.
+   # 7. Run the converters + Phase A.4 DINO cache against the raw slices.
    #    See scripts/prep_run_local.sh for the exact invocation used in CI rehearsal.
 
 Notes
@@ -98,7 +92,6 @@ from typing import Callable, Dict
 def _synthesizers() -> Dict[str, Callable[[Path], Path]]:
     from tests.golden_data._synthesize_agibot import synthesize_tiny_agibot
     from tests.golden_data._synthesize_bridge import synthesize_tiny_bridge
-    from tests.golden_data._synthesize_oxe_auge import synthesize_tiny_oxe_auge
     from tests.golden_data._synthesize_rh20t import synthesize_tiny_rh20t
     from tests.golden_data._synthesize_robomind import synthesize_tiny_robomind
     from tests.golden_data._synthesize_tiny_droid import synthesize_tiny_droid
@@ -109,7 +102,6 @@ def _synthesizers() -> Dict[str, Callable[[Path], Path]]:
         "tiny_robomind": synthesize_tiny_robomind,
         "tiny_bridge": synthesize_tiny_bridge,
         "tiny_rh20t": synthesize_tiny_rh20t,
-        "tiny_oxe_auge": synthesize_tiny_oxe_auge,
     }
 
 

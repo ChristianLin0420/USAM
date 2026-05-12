@@ -112,7 +112,7 @@ sbatch slurm/job.sbatch <stage_module> <dataset> <chunk> [extra args...]
   `python -m prep.<stage_module> --dataset <dataset> --chunk <chunk> --resume`
   (Wave F: one A100 node per dataset).
 * `<dataset>` is one of `droid`, `agibot2026`, `rh20t`, `robomind`,
-  `bridge`, `oxe_auge`.
+  `bridge`.
 * `<chunk>` is a non-negative integer.
 
 Logs land in `${USAM_REPO}/logs/usam-<jobid>.{out,err}`.
@@ -165,8 +165,8 @@ Set these in `~/.bashrc` or a per-cluster `.envrc`:
 
 * Slurm template, env, signal handling, requeue: **pipeline-engineer**
   (this file's owner).
-* Per-source converter behaviour (DROID, AgiBot, RH20T, RoboMIND, Bridge,
-  OXE-AugE): **data-engineer**.
+* Per-source converter behaviour (DROID, AgiBot, RH20T, RoboMIND, Bridge):
+  **data-engineer**.
 * Singularity image build, pip pinning: **infra-engineer**.
 * Anything routed via `team lead` if it crosses agents.
 

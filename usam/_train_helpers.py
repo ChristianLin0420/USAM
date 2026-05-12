@@ -465,6 +465,219 @@ class SmokePlayer(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Real LDA-1B Player (MMDiT). Same forward surface as SmokePlayer; only the
+# trunk changes. Used when `_USAMTrainConfig.use_lda_player=True`.
+# ---------------------------------------------------------------------------
+class LDAPlayer(nn.Module):
+    """Production-grade Player: thin shim around the real MM-DiT from
+    ``lda/model/modules/action_model/flow_matching_head/mmdit/mmdit/mmdit_cross_attn.py``.
+
+    The shim does three things on top of the raw ``MMDiT``:
+
+    1. Fuses cached RGB+depth DINO features into a single image-token
+       stream (``[B, T*N, input_embedding_dim]``). This skips the heavy
+       internal DINO encoder inside ``FlowmatchingActionHead`` — we already
+       paid for DINO at prep time.
+    2. Samples a diffusion timestep + projects the noisy action chunk to
+       token form (``[B, chunk, input_embedding_dim]``).
+    3. Routes the plan-cache committed K/V (layer 0) as the cross-attention
+       text-token stream so the same plumbing as the smoke run lights up.
+
+    Forward returns the same dict shape as :class:`SmokePlayer` so the
+    rest of :class:`USAMTrainModel` is unchanged.
+    """
+
+    def __init__(
+        self,
+        *,
+        rgb_dim: int = 1024,
+        depth_dim: int = 1024,
+        action_dim: int = 7,
+        action_chunk: int = 8,
+        proprio_dim: int = 50,
+        # MMDiT knobs
+        num_layers: int = 24,
+        num_attention_heads: int = 32,
+        attention_head_dim: int = 48,
+        input_embedding_dim: int = 1536,
+        output_dim: int = 1024,
+        cross_attention_dim: int = 1536,
+        n_register_tokens: int = 32,
+        enable_depth_head: bool = True,
+        enable_proprio_cond: bool = True,
+        positional_embeddings: str = "rope",
+        obs_timesteps: int = 12,  # history(4) + future(8) — matches the data window
+    ) -> None:
+        super().__init__()
+        from lda.model.modules.action_model.flow_matching_head.mmdit.mmdit.mmdit_cross_attn import (
+            MMDiT,
+        )
+        from torch.distributions import Beta
+
+        self.action_dim = action_dim
+        self.action_chunk = action_chunk
+        self.input_embedding_dim = input_embedding_dim
+        self.output_dim = output_dim
+        self.num_layers = num_layers
+        # `hidden_size` is consumed by PlanCache.refresh — it must match
+        # the cross-attention dim because plan K/V get fed as text_tokens.
+        self.hidden_size = cross_attention_dim
+        self.enable_depth_head = enable_depth_head
+        self.enable_proprio_cond = enable_proprio_cond
+
+        # Image-token layout consumed by the MMDiT blocks' 3D-RoPE
+        # reshape. Cached DINO features come in as [B, T, N, D] with
+        # N = 1 [CLS] + 64 patch tokens (8x8 grid). We treat the
+        # T frames as the diffusion `obs_timesteps`.
+        # `patch_shape` must satisfy patch_shape[0]*patch_shape[1] + glob_len == N.
+        self.patch_shape = (8, 8)
+        self.glob_len = 1  # the [CLS] token
+        # The DiT trunk sees register tokens packed onto the front.
+        self.n_register_tokens = n_register_tokens
+
+        # Trunk: real MMDiT.
+        self.dit = MMDiT(
+            num_attention_heads=num_attention_heads,
+            attention_head_dim=attention_head_dim,
+            cross_attention_dim=cross_attention_dim,
+            output_dim=output_dim,
+            num_layers=num_layers,
+            dropout=0.0,
+            activation_fn="gelu-approximate",
+            attention_bias=True,
+            norm_elementwise_affine=False,
+            final_norm=True,
+            num_residual_streams=1,
+            positional_embeddings=positional_embeddings,
+            enable_proprio_cond=enable_proprio_cond,
+            proprio_dim=proprio_dim,
+            enable_depth_head=enable_depth_head,
+            # 3D-RoPE reshape contract — threaded into each MMDiTBlock.
+            patch_shape=self.patch_shape,
+            glob_len=self.glob_len,
+            num_register_tokens=n_register_tokens,
+            obs_timesteps=obs_timesteps,
+        )
+
+        # RGB+depth fusion: concat on feature axis (rgb_dim + depth_dim → E).
+        fuse_in = rgb_dim + (depth_dim if enable_depth_head else 0)
+        self.rgbdepth_proj = nn.Linear(fuse_in, input_embedding_dim)
+
+        # Noisy action stem (action_dim → input_embedding_dim).
+        self.action_in = nn.Linear(action_dim, input_embedding_dim)
+
+        # Decoder back to action_dim from MMDiT's output_dim head.
+        self.action_head = nn.Linear(output_dim, action_dim)
+
+        # Learnable register tokens (LDA-1B `num_target_vision_tokens`).
+        self.register_tokens_param = nn.Parameter(
+            0.02 * torch.randn(n_register_tokens, input_embedding_dim)
+        )
+
+        # Beta-flow noise sampler (matches FlowmatchingActionHead's choice).
+        self.beta_dist = Beta(1.5, 1.0)
+        self.num_timestep_buckets = 1000
+
+    # ------------------------------------------------------------------
+    # PlanCache compatibility — see SmokePlayer.make_plan_kv_projs.
+    # MMDiT has its own cross-attention K/V, so these projections are
+    # only kept to populate the cache (which the drift / subtask losses
+    # still read via `committed_emb`). One pair per MMDiT block.
+    # ------------------------------------------------------------------
+    def make_plan_kv_projs(self) -> Tuple[List[nn.Linear], List[nn.Linear]]:
+        if not hasattr(self, "plan_k_projs"):
+            self.plan_k_projs = nn.ModuleList(
+                [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(self.num_layers)]
+            )
+            self.plan_v_projs = nn.ModuleList(
+                [nn.Linear(self.hidden_size, self.hidden_size) for _ in range(self.num_layers)]
+            )
+        return list(self.plan_k_projs), list(self.plan_v_projs)
+
+    def forward(
+        self,
+        rgb_dino_seq: Tensor,
+        depth_dino_seq: Tensor,
+        proprio: Tensor,
+        action_noisy: Tensor,
+        plan_cache: PlanCache,
+    ) -> Dict[str, Tensor]:
+        assert rgb_dino_seq.dim() == 4
+        assert depth_dino_seq.dim() == 4
+        B, T, N, _ = rgb_dino_seq.shape
+
+        # 1. Fuse cached features into a single image-token stream.
+        if self.enable_depth_head:
+            fused = torch.cat([rgb_dino_seq, depth_dino_seq], dim=-1)
+        else:
+            fused = rgb_dino_seq
+        image_tokens = self.rgbdepth_proj(fused).view(B, T * N, -1)
+
+        # 2. Action stem.
+        action_tokens = self.action_in(action_noisy)
+
+        # 3. Text tokens: use the layer-0 K from the plan-cache (already
+        #    projected from P_hat by `make_plan_kv_projs`). When the cache
+        #    hasn't been refreshed yet, fall back to zeros to keep shapes
+        #    consistent.
+        if plan_cache.is_valid():
+            k0, _ = plan_cache.get(0, branch="image")
+            text_tokens = k0.to(image_tokens.dtype)
+        else:
+            text_tokens = torch.zeros(
+                B, plan_cache.n_plan, self.hidden_size,
+                device=image_tokens.device, dtype=image_tokens.dtype,
+            )
+
+        # 4. Register tokens, broadcast per-sample.
+        register_tokens = self.register_tokens_param.unsqueeze(0).expand(B, -1, -1).to(image_tokens.dtype)
+
+        # 5. Diffusion timestep (Beta-distributed continuous → bucketized).
+        t_cont = self.beta_dist.sample([B]).to(image_tokens.device, dtype=torch.float32)
+        time_cond = (t_cont * self.num_timestep_buckets).long()
+
+        # 6. MMDiT forward.
+        proprio_arg = proprio if self.enable_proprio_cond else None
+        out = self.dit(
+            image_tokens=image_tokens,
+            action_tokens=action_tokens,
+            text_tokens=text_tokens,
+            register_tokens=register_tokens,
+            text_mask=None,
+            time_cond=time_cond,
+            task_embedding=None,
+            proprio=proprio_arg,
+        )
+
+        # 7. Unpack outputs. With enable_depth_head=True we get a dict.
+        if isinstance(out, dict):
+            image_pred = out["image_tokens"]
+            action_pred_e = out["action_tokens"]
+            depth_pred = out["depth_tokens"]
+        else:
+            image_pred, action_pred_e = out
+            depth_pred = image_pred  # share head if depth disabled
+
+        # 8. Reshape image/depth back to [B, T, N, D] for the loss aggregator.
+        rgb_pred = image_pred.view(B, T, N, -1)
+        depth_pred_btnd = depth_pred.view(B, T, N, -1)
+
+        # 9. Project the action stream back to action_dim.
+        action_out = self.action_head(action_pred_e)
+        # MMDiT may return action_tokens including the optional state /
+        # history prefix; slice the last `action_chunk` positions just in
+        # case (matches LDA-1B's `pred_actions[:, -actions.shape[1] : ]`).
+        action_out = action_out[:, -self.action_chunk :]
+
+        return {
+            "action": action_out,
+            "image": rgb_pred,
+            "depth": depth_pred_btnd,
+            "geom": {"depth_dino_pred": depth_pred_btnd, "rgb_dino_pred": rgb_pred},
+        }
+
+
+# ---------------------------------------------------------------------------
 # USAM training model (composes Conductor + Player + drift + subtask + losses)
 # ---------------------------------------------------------------------------
 @dataclass
@@ -492,6 +705,20 @@ class _USAMTrainConfig:
     backbone_seq_len: int = 64
     cache_dropout_p: float = 0.5
     cache_dropout_window: int = 60
+
+    # Real LDA-1B Player switch (MMDiT-based). When False the smoke
+    # SmokePlayer is used (5M params). When True we instantiate the real
+    # MMDiT from lda/.../mmdit_cross_attn.py and feed cached DINO features
+    # as image tokens. The remaining mmdit_* fields are only consulted
+    # when use_lda_player is True.
+    use_lda_player: bool = False
+    mmdit_input_embedding_dim: int = 1536       # DiT-L inner dim
+    mmdit_num_attention_heads: int = 32
+    mmdit_attention_head_dim: int = 48
+    mmdit_output_dim: int = 1024                # matches DINOv3-L
+    mmdit_num_register_tokens: int = 32
+    mmdit_enable_depth_head: bool = True
+    mmdit_enable_proprio_cond: bool = True
 
 
 class USAMTrainModel(nn.Module):
@@ -526,6 +753,11 @@ class USAMTrainModel(nn.Module):
         self.cfg = cfg
 
         # Conductor with mock backbone (Wave-4 swaps for real Qwen3-VL).
+        # When the real LDA-1B Player is in play, we drive P_hat at the
+        # MMDiT cross-attn dim instead of the SmokePlayer's hidden_size.
+        conductor_d_model = (
+            cfg.mmdit_input_embedding_dim if cfg.use_lda_player else cfg.hidden_size
+        )
         backbone = MockConductorBackbone(
             hidden_size=cfg.backbone_hidden,
             seq_len=cfg.backbone_seq_len,
@@ -533,7 +765,7 @@ class USAMTrainModel(nn.Module):
         self.conductor = Conductor(
             qwen_ckpt="",
             n_plan_tokens=cfg.n_plan_tokens,
-            player_d_model=cfg.hidden_size,
+            player_d_model=conductor_d_model,
             e_proj_dim=cfg.e_proj_dim,
             backbone_override=backbone,
             backbone_hidden=cfg.backbone_hidden,
@@ -541,17 +773,35 @@ class USAMTrainModel(nn.Module):
         )
 
         # Player.
-        self.player = SmokePlayer(
-            hidden_size=cfg.hidden_size,
-            rgb_dim=cfg.rgb_dim,
-            depth_dim=cfg.depth_dim,
-            num_layers=cfg.num_layers,
-            num_heads=cfg.num_heads,
-            action_dim=cfg.action_dim,
-            action_chunk=cfg.action_chunk,
-            n_keep_tokens=cfg.n_keep_tokens,
-            proprio_dim=cfg.proprio_dim,
-        )
+        if cfg.use_lda_player:
+            self.player = LDAPlayer(
+                rgb_dim=cfg.rgb_dim,
+                depth_dim=cfg.depth_dim,
+                action_dim=cfg.action_dim,
+                action_chunk=cfg.action_chunk,
+                proprio_dim=cfg.proprio_dim,
+                num_layers=cfg.num_layers,
+                num_attention_heads=cfg.mmdit_num_attention_heads,
+                attention_head_dim=cfg.mmdit_attention_head_dim,
+                input_embedding_dim=cfg.mmdit_input_embedding_dim,
+                output_dim=cfg.mmdit_output_dim,
+                cross_attention_dim=cfg.mmdit_input_embedding_dim,
+                n_register_tokens=cfg.mmdit_num_register_tokens,
+                enable_depth_head=cfg.mmdit_enable_depth_head,
+                enable_proprio_cond=cfg.mmdit_enable_proprio_cond,
+            )
+        else:
+            self.player = SmokePlayer(
+                hidden_size=cfg.hidden_size,
+                rgb_dim=cfg.rgb_dim,
+                depth_dim=cfg.depth_dim,
+                num_layers=cfg.num_layers,
+                num_heads=cfg.num_heads,
+                action_dim=cfg.action_dim,
+                action_chunk=cfg.action_chunk,
+                n_keep_tokens=cfg.n_keep_tokens,
+                proprio_dim=cfg.proprio_dim,
+            )
         self.player.make_plan_kv_projs()  # eagerly allocate
 
         # Drift MLP — takes RGB-DINO [CLS] + projected committed embedding.
@@ -577,10 +827,12 @@ class USAMTrainModel(nn.Module):
             geom_kwargs={"dim": cfg.rgb_dim, "hidden": 32, "tau": 1.0},
         )
 
-        # Plan cache (1 layer of plan tokens — match SmokePlayer's depth).
+        # Plan cache — its d_model must match the Conductor's player_d_model
+        # because the cache stores `k_proj(P_hat)` / `v_proj(P_hat)` per
+        # layer, each shaped [B, n_plan, d_model].
         self.plan_cache = PlanCache(
             n_layers=cfg.num_layers,
-            d_model=cfg.hidden_size,
+            d_model=conductor_d_model,
             n_plan=cfg.n_plan_tokens,
             dtype=torch.float32,  # CPU plumbing test runs in fp32
             history_size=8,

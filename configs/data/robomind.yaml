@@ -11,6 +11,9 @@ fps_action: 25
 
 download:
   # RoboMIND ships HDF5 trajectories under per-embodiment subdirs.
+  # The HF repo id is x-humanoid-robomind/RoboMIND (hyphen, not slash) and
+  # is gated — `HF_TOKEN` with granted access is required for snapshot_download.
+  hub_repo_id: "x-humanoid-robomind/RoboMIND"
   raw_root: "/scratch/usam/robomind/raw"
   drop_simulation: true   # we never train on h5_simulation
 

@@ -43,9 +43,17 @@ ROBOMIND_EMBODIMENT: str = "robomind_tien_kung"
 ROBOMIND_FPS: int = 25
 ROBOMIND_NATIVE_ACTION_DIM: int = 14  # bimanual joint positions (7 + 7)
 ROBOMIND_CAMERA_MAP: Dict[str, str] = {
+    # Egocentric-only mixture: drop both wrist views; keep only the head
+    # camera. The HDF5 key for the head camera varies across RoboMIND
+    # embodiments (Franka uses `camera_top`, AgileX `head_cam`, Tien Kung
+    # `head_color`, others `head_camera`). We list every observed alias
+    # so the converter's `keys` iteration picks the right one regardless
+    # of embodiment; all aliases collapse to the canonical `head_rgb`.
     "head_cam": "head_rgb",
-    "left_wrist_cam": "wrist_rgb_left",
-    "right_wrist_cam": "wrist_rgb_right",
+    "camera_top": "head_rgb",
+    "head_camera": "head_rgb",
+    "head_color": "head_rgb",
+    "cam_high": "head_rgb",
 }
 ROBOMIND_BGR_THRESHOLD: float = 5.0  # blue-mean - red-mean must exceed this
 ROBOMIND_DROP_EMBODIMENTS: Tuple[str, ...] = ("h5_simulation",)
