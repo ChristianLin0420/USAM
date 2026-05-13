@@ -1,47 +1,59 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 #
-# Run the full USAM Phase A pipeline locally for ONE source on the dev box.
+# Run the unified USAM Phase A pipeline locally for ONE dataset on the dev box.
+# This is the same Python entry the Slurm sbatch files use
+# (``slurm/pipeline_<dataset>.sbatch``) — running it locally is the simplest
+# way to validate a config / converter / depth model against real raw data.
 #
-# Sequence: download -> index -> 2a -> 2b -> 2c -> 3 -> 4 -> validate
-# (Stage 6 / Hub upload is out-of-scope for the local path; use
-#  scripts/prep_submit_slurm.sh + the long-lived CommitScheduler for that.)
+# Stages run in-process per chunk: 2a -> 2c -> 3 -> 4 -> 5 (validate).
+# Resume: ``<output_root>/<dataset>/chunk-NNN/.pipeline_complete`` markers.
 #
 # Usage:
-#   bash scripts/prep_run_local.sh --source droid \
-#        --config configs/data/droid.yaml \
-#        --raw /scratch/usam/droid/raw \
-#        --out /scratch/usam/droid/output \
-#        [--chunk 0] [--dry-run] [--skip-download]
+#   bash scripts/prep_run_local.sh --dataset droid \
+#        --output-root /scratch/usam/staged \
+#        [--config configs/data/droid.yaml] \
+#        [--raw-root /scratch/usam/droid/raw] \
+#        [--start-chunk 0] [--max-chunks 1]
 #
-# Defaults to chunk 0; rerun with a different --chunk to process more.
+# To do a stage-0 raw download first, run ``python -m prep.stage_0_download.<dataset>``
+# manually (the orchestrator only handles stages 2a..5).
 
 set -euo pipefail
 
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-SOURCE=""
+DATASET=""
+OUTPUT_ROOT=""
 CONFIG=""
-RAW=""
-OUT=""
-CHUNK=0
-DRY_RUN=0
-SKIP_DOWNLOAD=0
+RAW_ROOT=""
+START_CHUNK=0
+MAX_CHUNKS=""
+NUM_WORKERS_2A=8
+NUM_GPUS=0
+WORKERS_PER_GPU=1
+DINOV3_CKPT="${USAM_DINOV3_CKPT:-facebook/dinov3-vitl16-pretrain-lvd1689m}"
+DA3_CKPT="${USAM_DA3_CKPT:-depth-anything/DA3MONO-LARGE}"
 PYTHON="${PYTHON:-python}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --source)       SOURCE="$2"; shift 2 ;;
-    --config)       CONFIG="$2"; shift 2 ;;
-    --raw)          RAW="$2"; shift 2 ;;
-    --out)          OUT="$2"; shift 2 ;;
-    --chunk)        CHUNK="$2"; shift 2 ;;
-    --dry-run)      DRY_RUN=1; shift ;;
-    --skip-download) SKIP_DOWNLOAD=1; shift ;;
-    --python)       PYTHON="$2"; shift 2 ;;
+    --dataset)         DATASET="$2"; shift 2 ;;
+    --source)          DATASET="$2"; shift 2 ;;  # legacy alias
+    --output-root|--out) OUTPUT_ROOT="$2"; shift 2 ;;
+    --config)          CONFIG="$2"; shift 2 ;;
+    --raw-root|--raw)  RAW_ROOT="$2"; shift 2 ;;
+    --start-chunk|--chunk) START_CHUNK="$2"; shift 2 ;;
+    --max-chunks)      MAX_CHUNKS="$2"; shift 2 ;;
+    --num-workers-2a)  NUM_WORKERS_2A="$2"; shift 2 ;;
+    --num-gpus)        NUM_GPUS="$2"; shift 2 ;;
+    --workers-per-gpu) WORKERS_PER_GPU="$2"; shift 2 ;;
+    --dinov3-ckpt)     DINOV3_CKPT="$2"; shift 2 ;;
+    --da3-ckpt)        DA3_CKPT="$2"; shift 2 ;;
+    --python)          PYTHON="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,16p' "$0"
+      sed -n '2,21p' "$0"
       exit 0
       ;;
     *)
@@ -49,48 +61,25 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -z "$SOURCE" ]] && { echo "--source is required" >&2; exit 2; }
-[[ -z "$CONFIG" ]] && { echo "--config is required" >&2; exit 2; }
-[[ -z "$RAW" ]] && { echo "--raw is required" >&2; exit 2; }
-[[ -z "$OUT" ]] && { echo "--out is required" >&2; exit 2; }
+[[ -z "$DATASET" ]] && { echo "--dataset is required" >&2; exit 2; }
+[[ -z "$OUTPUT_ROOT" ]] && { echo "--output-root is required" >&2; exit 2; }
 
-mkdir -p "$RAW" "$OUT"
+mkdir -p "$OUTPUT_ROOT"
 
-DRY_FLAG=""
-[[ "$DRY_RUN" -eq 1 ]] && DRY_FLAG="--dry-run"
+ARGS=(
+  --dataset "$DATASET"
+  --output-root "$OUTPUT_ROOT"
+  --start-chunk "$START_CHUNK"
+  --num-workers-2a "$NUM_WORKERS_2A"
+  --num-gpus "$NUM_GPUS"
+  --workers-per-gpu "$WORKERS_PER_GPU"
+  --dinov3-ckpt "$DINOV3_CKPT"
+  --da3-ckpt "$DA3_CKPT"
+  --resume
+)
+[[ -n "$CONFIG" ]]     && ARGS+=(--config "$CONFIG")
+[[ -n "$RAW_ROOT" ]]   && ARGS+=(--raw-root "$RAW_ROOT")
+[[ -n "$MAX_CHUNKS" ]] && ARGS+=(--max-chunks "$MAX_CHUNKS")
 
-echo "[prep_run_local] source=$SOURCE chunk=$CHUNK dry_run=$DRY_RUN"
-
-if [[ "$SKIP_DOWNLOAD" -eq 0 ]]; then
-  echo "[prep_run_local] stage 0: download"
-  "$PYTHON" -m "prep.stage_0_download.${SOURCE}" \
-    --config "$CONFIG" --cache "$RAW" $DRY_FLAG
-else
-  echo "[prep_run_local] stage 0: SKIPPED"
-fi
-
-echo "[prep_run_local] stage 1: index"
-"$PYTHON" -m prep.stage_1_index \
-  --dataset "$SOURCE" --raw "$RAW" --out "$OUT" --chunk "$CHUNK"
-
-# Stages 2a, 2c, 3, 4 are owned by data-engineer; entry points accept
-# --dataset / --chunk / --resume (Wave F: one A100 node per dataset).
-for STAGE in stage_2a_to_lerobot stage_2c_compute_depth \
-             stage_3_canonical stage_4_dino_cache; do
-  echo "[prep_run_local] $STAGE"
-  set +e
-  "$PYTHON" -m "prep.${STAGE}" \
-    --dataset "$SOURCE" --chunk "$CHUNK" --resume
-  RC=$?
-  set -e
-  if [[ "$RC" -ne 0 && "$RC" -ne 124 ]]; then
-    echo "[prep_run_local] $STAGE failed with exit $RC" >&2
-    exit "$RC"
-  fi
-done
-
-echo "[prep_run_local] stage 5: validate"
-"$PYTHON" -m prep.stage_5_validate \
-  --dataset "$SOURCE" --output-root "$OUT"
-
-echo "[prep_run_local] done. Outputs at $OUT/$SOURCE"
+echo "[prep_run_local] dataset=$DATASET output_root=$OUTPUT_ROOT start_chunk=$START_CHUNK"
+exec "$PYTHON" -m prep.run_pipeline "${ARGS[@]}"

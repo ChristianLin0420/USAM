@@ -31,7 +31,7 @@ import yaml  # type: ignore[import-not-found]
 _LOG = logging.getLogger("prep.stage_2a_to_lerobot")
 
 
-_SOURCES = ("droid", "agibot2026", "bridge", "rh20t", "robomind")
+_SOURCES = ("droid", "agibot2026", "bridge", "robomind")
 
 
 def _build_converter(args: argparse.Namespace, cfg: dict):
@@ -67,33 +67,18 @@ def _build_converter(args: argparse.Namespace, cfg: dict):
         )
 
     if args.dataset == "agibot2026":
-        from prep.stage_2a_to_lerobot.agibot2026 import AgibotConverter
+        from prep.stage_2a_to_lerobot.agibot2026 import AgiBot2026Converter
         raw_root = args.raw_root
         if raw_root is None and "raw_root" in download:
             raw_root = Path(download["raw_root"])
-        return AgibotConverter(
+        return AgiBot2026Converter(
             chunk=args.chunk,
             output_root=output_root,
             raw_root=Path(raw_root) if raw_root else None,
         )
 
-    if args.dataset == "rh20t":
-        from prep.stage_2a_to_lerobot.rh20t import Rh20TConverter
-        raw_root = args.raw_root or download.get("raw_root")
-        if not raw_root:
-            raise SystemExit(
-                "RH20T requires --raw-root or download.raw_root in the YAML. "
-                "RH20T tarballs must be mirrored locally before stage_2a — see configs/data/rh20t.yaml."
-            )
-        return Rh20TConverter(
-            chunk=args.chunk,
-            output_root=output_root,
-            raw_root=Path(raw_root),
-            config=args.rh20t_config or (download.get("configs") or [None])[args.chunk % len(download.get("configs") or [None])],
-        )
-
     if args.dataset == "robomind":
-        from prep.stage_2a_to_lerobot.robomind import RobomindConverter
+        from prep.stage_2a_to_lerobot.robomind import RoboMINDConverter as RobomindConverter
         raw_root = args.raw_root or download.get("raw_root")
         if not raw_root:
             raise SystemExit(
@@ -205,6 +190,91 @@ def _worker_main(
     return n_processed, n_skipped
 
 
+def run_chunk(
+    dataset: str,
+    chunk: int,
+    staged_root: Path,
+    cfg: dict | None = None,
+    raw_root: Path | None = None,
+    rlds_data_dir: str | None = None,
+    karlp_root: Path | None = None,
+    config: Path | None = None,
+    resume: bool = True,
+    num_workers: int = 1,
+) -> tuple[int, int]:
+    """Run stage 2a for one ``(dataset, chunk)`` pair in-process.
+
+    Builds the per-source converter, iterates episodes, and stages each one
+    under ``staged_root/<dataset>/chunk-NNN/ep_*/``. This is the function the
+    pipeline orchestrator (``prep.run_pipeline``) calls directly; the CLI
+    ``main()`` is a thin wrapper that parses argv and delegates here.
+
+    Returns ``(n_processed, n_skipped)``.
+    """
+    if dataset not in _SOURCES:
+        raise ValueError(f"unknown dataset {dataset!r}; have {sorted(_SOURCES)}")
+    if cfg is None:
+        cfg_path = config or Path("configs/data") / f"{dataset}.yaml"
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"config not found: {cfg_path}")
+        cfg = yaml.safe_load(cfg_path.read_text()) or {}
+
+    args = argparse.Namespace(
+        dataset=dataset,
+        chunk=int(chunk),
+        staged_root=Path(staged_root),
+        config=Path(config) if config else None,
+        rlds_data_dir=rlds_data_dir,
+        karlp_root=Path(karlp_root) if karlp_root else None,
+        raw_root=Path(raw_root) if raw_root else None,
+        resume=bool(resume),
+        num_workers=int(num_workers),
+    )
+
+    _LOG.info(
+        "stage_2a: dataset=%s chunk=%d staged_root=%s num_workers=%d",
+        dataset, chunk, args.staged_root, num_workers,
+    )
+
+    if num_workers <= 1:
+        converter = _build_converter(args, cfg)
+        n_processed = 0
+        n_skipped = 0
+        for ref in converter.list_episodes():
+            if resume and converter.is_done(ref):
+                n_skipped += 1
+                continue
+            _process_one(converter, ref)
+            n_processed += 1
+            if n_processed % 5 == 0:
+                _LOG.info("  staged %d episodes (skipped %d)", n_processed, n_skipped)
+    else:
+        import multiprocessing as mp
+        args_dict = {
+            k: (str(v) if isinstance(v, Path) else v)
+            for k, v in vars(args).items()
+        }
+        args_dict["staged_root"] = Path(args_dict["staged_root"])
+        if args_dict.get("karlp_root"):
+            args_dict["karlp_root"] = Path(args_dict["karlp_root"])
+        if args_dict.get("config"):
+            args_dict["config"] = Path(args_dict["config"])
+        ctx = mp.get_context("spawn")
+        with ctx.Pool(processes=num_workers) as pool:
+            results = pool.starmap(
+                _worker_main,
+                [(r, num_workers, args_dict, cfg) for r in range(num_workers)],
+            )
+        n_processed = sum(p for p, _ in results)
+        n_skipped = sum(s for _, s in results)
+
+    _LOG.info(
+        "stage_2a done: dataset=%s chunk=%d processed=%d skipped=%d",
+        dataset, chunk, n_processed, n_skipped,
+    )
+    return n_processed, n_skipped
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="prep.stage_2a_to_lerobot")
     ds = parser.add_mutually_exclusive_group(required=True)
@@ -244,16 +314,9 @@ def main(argv: list[str] | None = None) -> int:
         "--raw-root",
         type=Path,
         default=None,
-        help="Local root for raw data (AgiBot HF snapshot / RH20T tarballs / "
-             "RoboMIND HDF5 trees). Required when the source's download mode "
-             "is 'local mirror'.",
-    )
-    parser.add_argument(
-        "--rh20t-config",
-        type=str,
-        default=None,
-        help="Pin a single RH20T per-rig config (e.g. 'RH20T_cfg3'). When "
-             "omitted, the chunk index round-robins over download.configs.",
+        help="Local root for raw data (AgiBot HF snapshot / RoboMIND HDF5 "
+             "trees). Required when the source's download mode is "
+             "'local mirror'.",
     )
     parser.add_argument(
         "--resume",
@@ -271,59 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO)
-
-    cfg_path = args.config or Path("configs/data") / f"{args.dataset}.yaml"
-    if not cfg_path.exists():
-        raise SystemExit(f"config not found: {cfg_path}")
-    cfg = yaml.safe_load(cfg_path.read_text()) or {}
-
-    _LOG.info(
-        "stage_2a: dataset=%s chunk=%d staged_root=%s num_workers=%d",
-        args.dataset, args.chunk, args.staged_root, args.num_workers,
-    )
-
-    if args.num_workers <= 1:
-        # Single-process path (bit-identical to the pre-parallel impl).
-        converter = _build_converter(args, cfg)
-        n_processed = 0
-        n_skipped = 0
-        for ref in converter.list_episodes():
-            if args.resume and converter.is_done(ref):
-                n_skipped += 1
-                continue
-            _process_one(converter, ref)
-            n_processed += 1
-            if n_processed % 5 == 0:
-                _LOG.info("  staged %d episodes (skipped %d)", n_processed, n_skipped)
-    else:
-        # Multi-process: each worker builds its own converter and claims
-        # episodes by `i % world_size == rank`. We use 'spawn' to avoid any
-        # fork-after-import hazards from TFDS / PyTorch globals.
-        import multiprocessing as mp
-        # argparse.Namespace is not pickle-safe across spawn for Path args;
-        # convert to a plain dict the worker reconstitutes via Namespace(**).
-        args_dict = {
-            k: (str(v) if isinstance(v, Path) else v)
-            for k, v in vars(args).items()
-        }
-        # Restore Path types on the worker side too.
-        args_dict["staged_root"] = Path(args_dict["staged_root"])
-        if args_dict.get("karlp_root"):
-            args_dict["karlp_root"] = Path(args_dict["karlp_root"])
-        if args_dict.get("config"):
-            args_dict["config"] = Path(args_dict["config"])
-        ctx = mp.get_context("spawn")
-        with ctx.Pool(processes=args.num_workers) as pool:
-            results = pool.starmap(
-                _worker_main,
-                [(r, args.num_workers, args_dict, cfg) for r in range(args.num_workers)],
-            )
-        n_processed = sum(p for p, _ in results)
-        n_skipped = sum(s for _, s in results)
-
-    _LOG.info(
-        "stage_2a done: dataset=%s chunk=%d processed=%d skipped=%d",
-        args.dataset, args.chunk, n_processed, n_skipped,
+    run_chunk(
+        dataset=args.dataset,
+        chunk=args.chunk,
+        staged_root=args.staged_root,
+        config=args.config,
+        rlds_data_dir=args.rlds_data_dir,
+        karlp_root=args.karlp_root,
+        raw_root=args.raw_root,
+        resume=args.resume,
+        num_workers=args.num_workers,
     )
     return 0
 

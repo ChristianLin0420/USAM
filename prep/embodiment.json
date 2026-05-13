@@ -36,24 +36,6 @@
       },
       "fps": 30
     },
-    "rh20t_franka": {
-      "kind": "ee_pose_finite_diff",
-      "native_dim": 7,
-      "ee_dim": 7,
-      "comment": "RH20T's action is a 6-DoF EE pose (xyz + axis-angle) plus gripper. We finite-difference consecutive poses to get EE velocity, leaving gripper as-is.",
-      "indices": {
-        "ee_position_xyz": [0, 1, 2],
-        "ee_rotvec_xyz": [3, 4, 5],
-        "gripper": 6
-      },
-      "scale": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-      "bounds": {
-        "linear_velocity": [-2.0, 2.0],
-        "angular_velocity": [-3.141592653589793, 3.141592653589793],
-        "gripper": [0.0, 1.0]
-      },
-      "fps": 10
-    },
     "robomind_tien_kung": {
       "kind": "joint_position_to_ee_finite_diff",
       "native_dim": 14,

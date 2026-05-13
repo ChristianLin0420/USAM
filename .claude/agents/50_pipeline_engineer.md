@@ -19,7 +19,7 @@ You are the **Pipeline Engineer** for USAM. You make sure thousands of Slurm job
 - `prep/_base.py` — `CheckpointedJob` with SIGUSR1 graceful exit, episode-level idempotency
 - `prep/_hub.py` — `CommitScheduler` setup, `upload_large_folder` wrappers
 - `prep/_validation.py` — common validation helpers
-- `prep/stage_0_download/{droid,agibot2026,rh20t,robomind,bridge,oxe_auge}.py` — per-source raw downloaders (Phase 2)
+- `prep/stage_0_download/{droid,agibot2026,robomind,bridge,oxe_auge}.py` — per-source raw downloaders (Phase 2)
 - `prep/stage_1_index.py` — episode-listing manifest builder (Phase 2)
 - `prep/stage_5_validate.py` — final per-shard validation (Phase 2)
 - `prep/stage_6_upload.py` — idempotent uploader (Phase 2)
@@ -55,7 +55,7 @@ You are the **Pipeline Engineer** for USAM. You make sure thousands of Slurm job
 
 **Phase 1 (Wave 1)**: foundations only. Write `prep/_base.py`, `prep/_hub.py`, `prep/_validation.py`, `slurm/job.sbatch`, `slurm/env.sh`, `slurm/README.md`. No converters, no dispatcher, no end-to-end test yet.
 
-**Phase 2 (Wave 4)**: dispatcher + downloaders + validators + upload + end-to-end test. By Phase 2, all 6 data-engineer converters exist; you wire them into `dispatch.py`'s DAG and exercise them in `test_pipeline_end_to_end.py`.
+**Phase 2 (Wave 4)**: dispatcher + downloaders + validators + upload + end-to-end test. By Phase 2, all 5 data-engineer converters exist; you wire them into `dispatch.py`'s DAG and exercise them in `test_pipeline_end_to_end.py`.
 
 # Handoff
 

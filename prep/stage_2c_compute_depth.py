@@ -289,13 +289,13 @@ def main(argv: list[str] | None = None) -> int:
     ds = parser.add_mutually_exclusive_group(required=True)
     ds.add_argument(
         "--dataset",
-        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "robomind"),
         help="Source name (one A100 node per dataset).",
     )
     ds.add_argument(
         "--source",
         dest="dataset",
-        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "robomind"),
         help="(deprecated) use --dataset",
     )
     parser.add_argument("--chunk", required=True, type=int)

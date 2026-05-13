@@ -104,8 +104,6 @@ class EmbodimentTag(Enum):
 
     TASTE_Rob = "taste_rob"
 
-    RH20T = "rh20t"
-
 DEFAULT_TRAINING_TASKS = ["policy", "forward_dynamics", "inverse_dynamics", "video_gen"]
 
 TASK_MAPPING = {
@@ -119,7 +117,6 @@ TASK_MAPPING.update(
     {
         EmbodimentTag.EGOCENTRIC_10K.value: ["video_gen"],
         EmbodimentTag.TASTE_Rob.value: ["video_gen"],
-        EmbodimentTag.RH20T.value: ["video_gen"],
     }
 )
 
@@ -158,9 +155,8 @@ EMBODIMENT_TAG_MAPPING = {
     EmbodimentTag.EGOCENTRIC_10K.value: 28,
     EmbodimentTag.EGOVLA.value: 29,
     EmbodimentTag.FRANKA_DUAL.value: 30,
-    EmbodimentTag.RH20T.value: 31,
 
-    EmbodimentTag.NEW_EMBODIMENT.value: 32,
+    EmbodimentTag.NEW_EMBODIMENT.value: 31,
 }
 
 # Robot type to embodiment tag mapping
@@ -204,7 +200,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
     "ur": EmbodimentTag.UR,
     "tienkung_gello": EmbodimentTag.TIENKUNG_GELLO,
     "tienkung_xsens": EmbodimentTag.TIENKUNG_XSENS,
-    "rh20t": EmbodimentTag.RH20T,
     "unitree_g1": EmbodimentTag.Unitree,
     "galbot_sharpa": EmbodimentTag.GALBOT,
 

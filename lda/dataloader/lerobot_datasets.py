@@ -15,7 +15,7 @@ from lda.dataloader.gr00t_lerobot.mixtures import get_dataset_mixtures
 from lda.dataloader.gr00t_lerobot.data_config import ROBOT_TYPE_CONFIG_MAP
 from lda.dataloader.gr00t_lerobot.embodiment_tags import ROBOT_TYPE_TO_EMBODIMENT_TAG, EmbodimentTag
 TRAINING_TASKS = ["policy", "forward_dynamics", "inverse_dynamics", "video_gen"]
-VIDEOGEN_DATASET = ["egocentric_10k", "taste_rob", "rh20t"]
+VIDEOGEN_DATASET = ["egocentric_10k", "taste_rob"]
 def collate_fn(batch):
     return batch
 def collate_fn_Qwen2_5(batch, processor):

@@ -193,8 +193,6 @@ DATASET_NAMED_MIXTURES = {
         ("world_model/data/ego4d/ego4d_other_part5", 1.0, "vitra"),
         ("world_model/data/ego4d/ego4d_other_part6", 1.0, "vitra"),
 
-        ("world_model/data/RobotData/RH20T", 1.0, "rh20t"),
-
         ("public/world_model/RawData/egocentric-10k/egocentric-10k_extracted", 1.0, "egocentric_10k")
     ]
 

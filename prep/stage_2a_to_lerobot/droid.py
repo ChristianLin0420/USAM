@@ -179,7 +179,7 @@ class DroidConverter(CheckpointedJob):
 
         my_indices = shard_assignment(n_total=n_total, chunk=self.chunk)
         for ep_idx in my_indices:
-            # Canonical EpisodeRef schema (matches bridge / rh20t / robomind):
+            # Canonical EpisodeRef schema (matches bridge / robomind):
             # episode_id is a string; the integer index is recovered via int().
             yield EpisodeRef(
                 episode_id=str(int(ep_idx)),

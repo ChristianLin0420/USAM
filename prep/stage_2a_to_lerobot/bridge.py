@@ -129,7 +129,11 @@ class BridgeConverter(CheckpointedJob):
         T = len(steps)
         assert T > 0, f"empty Bridge episode {ref.episode_id}"
 
-        # Cameras.
+        # Cameras. Two known on-disk schemas:
+        #   * ``bridge_data_v2`` uses ``image_0``, ``image_1``, ``image_2``.
+        #   * ``bridge`` (RT-X, gs://gresearch/robotics) uses a single ``image``.
+        # Treat ``image`` as a synonym for the head_rgb source key when
+        # ``image_0`` is absent.
         cameras: Dict[str, np.ndarray] = {}
         for src_key, dst_key in BRIDGE_CAMERA_MAP.items():
             frames = []
@@ -137,12 +141,35 @@ class BridgeConverter(CheckpointedJob):
                 obs = s.get("observation", {})
                 if src_key in obs:
                     frames.append(np.asarray(obs[src_key], dtype=np.uint8))
+                elif src_key == "image_0" and "image" in obs:
+                    frames.append(np.asarray(obs["image"], dtype=np.uint8))
             if frames:
                 cameras[dst_key] = np.stack(frames, axis=0)
 
-        # Action: 7-D delta-pose + gripper.
+        # Action: 7-D delta-pose + gripper. Two known on-disk schemas:
+        #   * ``bridge_data_v2`` (Walke et al.): flat fp32 array of length 7
+        #     ``[dx, dy, dz, drx, dry, drz, gripper]``.
+        #   * ``bridge`` (RT-X re-registration on gs://gresearch/robotics):
+        #     a dict ``{world_vector: [3], rotation_delta: [3],
+        #     open_gripper: scalar}`` (or ``gripper_closedness_action``).
+        # Handle both so the same converter works against either source.
+        def _to_flat_action(a: object) -> np.ndarray:
+            if isinstance(a, dict):
+                wv = np.asarray(a.get("world_vector", np.zeros(3)), dtype=np.float32).reshape(-1)
+                rd = np.asarray(a.get("rotation_delta", np.zeros(3)), dtype=np.float32).reshape(-1)
+                if "open_gripper" in a:
+                    gr = np.asarray(a["open_gripper"], dtype=np.float32).reshape(-1)
+                elif "gripper_closedness_action" in a:
+                    gr = np.asarray(a["gripper_closedness_action"], dtype=np.float32).reshape(-1)
+                else:
+                    gr = np.zeros((1,), dtype=np.float32)
+                if gr.size == 0:
+                    gr = np.zeros((1,), dtype=np.float32)
+                return np.concatenate([wv[:3], rd[:3], gr[:1]]).astype(np.float32)
+            return np.asarray(a, dtype=np.float32)
+
         action_native_raw = np.stack(
-            [np.asarray(s["action"], dtype=np.float32) for s in steps], axis=0
+            [_to_flat_action(s["action"]) for s in steps], axis=0
         )
         if action_native_raw.ndim == 1:
             action_native_raw = action_native_raw.reshape(T, -1)
@@ -183,11 +210,18 @@ class BridgeConverter(CheckpointedJob):
         action_canonical_ee = canonicalize_action(action_native, BRIDGE_EMBODIMENT)
         validate_action_canonical(action_canonical_ee)
 
-        # Language: BridgeData carries ``language_instruction`` per step.
+        # Language: ``bridge_data_v2`` carries ``language_instruction`` per
+        # step; the RT-X ``bridge`` re-registration nests it inside
+        # ``observation/natural_language_instruction``. Check both.
         rlds_instr = ""
         first = steps[0]
+        v = None
         if "language_instruction" in first:
             v = first["language_instruction"]
+        else:
+            obs = first.get("observation", {}) or {}
+            v = obs.get("natural_language_instruction")
+        if v is not None:
             if isinstance(v, (bytes, bytearray)):
                 rlds_instr = v.decode("utf-8", errors="ignore")
             else:

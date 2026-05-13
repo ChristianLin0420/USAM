@@ -40,11 +40,10 @@ class SourceMixture:
 
 
 DEFAULT_TIER1_MIX: List[SourceMixture] = [
-    SourceMixture("droid", "<org>/usam-droid", 0.15),
-    SourceMixture("agibot2026", "<org>/usam-agibot2026", 0.30),
-    SourceMixture("rh20t", "<org>/usam-rh20t", 0.20),
-    SourceMixture("robomind", "<org>/usam-robomind", 0.15),
-    SourceMixture("bridge", "<org>/usam-bridge", 0.10),
+    SourceMixture("droid", "<org>/usam-droid", 0.20),
+    SourceMixture("agibot2026", "<org>/usam-agibot2026", 0.35),
+    SourceMixture("robomind", "<org>/usam-robomind", 0.20),
+    SourceMixture("bridge", "<org>/usam-bridge", 0.25),
 ]
 
 

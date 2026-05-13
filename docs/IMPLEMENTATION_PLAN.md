@@ -31,7 +31,7 @@ A fork of LDA-1B (RSS 2026, arXiv:2602.12215) extending it to a tri-modal World-
 
 | # | Goal | Concrete success metric |
 |---|---|---|
-| G1 | Ingest 6 Tier-1 robotic datasets into a unified format on HF Hub | DROID, AgiBot World 2026, RH20T, RoboMIND 2.0, BridgeData V2, OXE-AugE all in `<org>/usam-<source>` repos with USAM-LeRobot v2.1 layout |
+| G1 | Ingest 5 Tier-1 robotic datasets into a unified format on HF Hub | DROID, AgiBot World 2026, RoboMIND 2.0, BridgeData V2, OXE-AugE all in `<org>/usam-<source>` repos with USAM-LeRobot v2.1 layout |
 | G2 | Three modalities (RGB, depth, optical flow) projected to a shared DINOv3 latent space | Tri-DINO encoder produces aligned tokens; cross-modal InfoNCE > 0.6 on val |
 | G3 | Joint denoising of action + tri-modal future latents with cross-modal consistency losses | Single MM-DiT, 4 task heads, 2 auxiliary heads (`L_geom`, `L_flow-act`) |
 | G4 | Conductor + Player split with cosine-drift triggered Plan-KV-Cache | ≥3× inference speedup over per-step VLM forward at 30 Hz |
@@ -118,7 +118,6 @@ USAM/                                    ← fork of LDA-1B
 │   ├── stage_0_download/
 │   │   ├── droid.py
 │   │   ├── agibot2026.py
-│   │   ├── rh20t.py
 │   │   ├── robomind.py
 │   │   ├── bridge.py
 │   │   └── oxe_auge.py
@@ -126,7 +125,6 @@ USAM/                                    ← fork of LDA-1B
 │   ├── stage_2a_to_lerobot/
 │   │   ├── droid.py
 │   │   ├── agibot2026.py
-│   │   ├── rh20t.py
 │   │   ├── robomind.py
 │   │   ├── bridge.py
 │   │   └── oxe_auge.py
@@ -151,7 +149,6 @@ USAM/                                    ← fork of LDA-1B
 │   ├── data/
 │   │   ├── droid.yaml
 │   │   ├── agibot2026.yaml
-│   │   ├── rh20t.yaml
 │   │   ├── robomind.yaml
 │   │   ├── bridge.yaml
 │   │   ├── oxe_auge.yaml
@@ -941,11 +938,10 @@ class SourceMixture:
     weight: float
 
 DEFAULT_TIER1_MIX = [
-    SourceMixture("droid",       "<org>/usam-droid",       0.15),
-    SourceMixture("agibot2026",  "<org>/usam-agibot2026",  0.30),
-    SourceMixture("rh20t",       "<org>/usam-rh20t",       0.20),
-    SourceMixture("robomind",    "<org>/usam-robomind",    0.15),
-    SourceMixture("bridge",      "<org>/usam-bridge",      0.10),
+    SourceMixture("droid",       "<org>/usam-droid",       0.20),
+    SourceMixture("agibot2026",  "<org>/usam-agibot2026",  0.35),
+    SourceMixture("robomind",    "<org>/usam-robomind",    0.20),
+    SourceMixture("bridge",      "<org>/usam-bridge",      0.15),
     SourceMixture("oxe_auge",    "<org>/usam-oxe-auge",    0.10),
 ]
 ```
@@ -999,11 +995,6 @@ def upload_chunk_final(folder: Path, repo_id: str, chunk_id: int) -> None:
 - Camera mapping: `head → head_rgb`, `hand_left → wrist_rgb_left`, `hand_right → wrist_rgb_right`
 - Promote `instruction_segments` to top-level columns (level_1, level_2, level_3)
 - This is also our source of `subtask_label` ground truth
-
-#### `prep/stage_2a_to_lerobot/rh20t.py`
-- 7 robot configs; per-config camera serial map in `configs/data/camera_maps/rh20t.yaml`
-- Use `rh20t_api/extract.py` to derive frame-aligned depth from MP4
-- Keep F/T sensor → `force_torque[6]`
 
 #### `prep/stage_2a_to_lerobot/robomind.py`
 - Per-trajectory HDF5 → parquet + mp4
@@ -1148,9 +1139,9 @@ USAM/
 ├── prep/_base.py                                              [pipeline-engineer]
 ├── prep/_hub.py                                               [pipeline-engineer]
 ├── prep/_validation.py                                        [pipeline-engineer]
-├── prep/stage_0_download/{droid,agibot2026,rh20t,robomind,bridge,oxe_auge}.py    [pipeline-engineer]
+├── prep/stage_0_download/{droid,agibot2026,robomind,bridge,oxe_auge}.py    [pipeline-engineer]
 ├── prep/stage_1_index.py                                      [pipeline-engineer]
-├── prep/stage_2a_to_lerobot/{droid,agibot2026,rh20t,robomind,bridge,oxe_auge}.py [data-engineer]
+├── prep/stage_2a_to_lerobot/{droid,agibot2026,robomind,bridge,oxe_auge}.py [data-engineer]
 ├── prep/stage_2b_compute_flow.py                              [data-engineer]
 ├── prep/stage_2c_compute_depth.py                             [data-engineer]
 ├── prep/stage_3_canonical.py                                  [data-engineer]
@@ -1161,7 +1152,7 @@ USAM/
 ├── prep/adapter_pretrain.py                                   [model-architect]
 ├── slurm/{job.sbatch,env.sh,README.md}                        [infra agent]
 ├── docker/{Dockerfile.local_a40,prep_a100,train_h200,README.md}  [infra agent]
-├── configs/data/{droid,agibot2026,rh20t,robomind,bridge,oxe_auge}.yaml           [data-engineer]
+├── configs/data/{droid,agibot2026,robomind,bridge,oxe_auge}.yaml           [data-engineer]
 ├── configs/data/camera_maps/                                  [data-engineer]
 ├── configs/model/{usam_1_4b,usam_350m_smoke}.yaml             [model-architect]
 ├── configs/train/{stage_b1_pretrain,stage_b2_finetune,adapter_pretrain}.yaml     [training-engineer]

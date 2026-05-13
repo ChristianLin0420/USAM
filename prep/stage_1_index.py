@@ -121,19 +121,6 @@ def _enumerate_agibot(raw_root: Path) -> Iterator[_RawEpisode]:
     yield from _enumerate_local_dir("agibot2026", "agibot_g1", raw_root, "*.parquet")
 
 
-def _enumerate_rh20t(raw_root: Path) -> Iterator[_RawEpisode]:
-    if not raw_root.exists():
-        return
-    for cfg in sorted(p for p in raw_root.iterdir() if p.is_dir()):
-        for traj in sorted(p for p in cfg.iterdir() if p.is_dir()):
-            yield _RawEpisode(
-                episode_id=f"rh20t::{cfg.name}::{traj.name}",
-                embodiment="rh20t_franka",
-                raw_path=str(traj.resolve()),
-                n_frames=0,
-            )
-
-
 def _enumerate_robomind(raw_root: Path) -> Iterator[_RawEpisode]:
     yield from _enumerate_local_dir("robomind", "robomind_tien_kung", raw_root, "*.h5")
 
@@ -145,7 +132,6 @@ def _enumerate_bridge(raw_root: Path) -> Iterator[_RawEpisode]:
 _ENUMERATORS = {
     "droid": _enumerate_droid,
     "agibot2026": _enumerate_agibot,
-    "rh20t": _enumerate_rh20t,
     "robomind": _enumerate_robomind,
     "bridge": _enumerate_bridge,
 }

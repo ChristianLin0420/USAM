@@ -666,9 +666,6 @@ class RobomindDataConfig(BaseDataConfig):
 class Challange2025DataConfig(BaseDataConfig):
     pass
 
-class RH20TDataConfig(BaseDataConfig):
-    pass
-
 # Human Data Config
 class VitraDataConfig(HumanBaseDataConfig):
     pass
@@ -963,7 +960,6 @@ ROBOT_TYPE_CONFIG_MAP = {
     "taste_rob": TASTE_robDataConfig(),
     "egocentric_10k": EgoCentric10KDataConfig(),
     "vitra": VitraDataConfig(),
-    "rh20t": RH20TDataConfig(),
 
     "demo_data": DemoDataConfig(),
 }

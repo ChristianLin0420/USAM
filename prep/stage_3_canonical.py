@@ -148,9 +148,8 @@ def _canon_ee_pose_finite_diff(
     velocity-style canonical action. The gripper is NOT differentiated; it is
     passed through as-is and clipped to [0, 1].
 
-    Used for RH20T (fps=10) and provided as a reusable building block for any
-    embodiment whose native control loop ships pose targets rather than
-    velocities.
+    Provided as a reusable building block for any embodiment whose native
+    control loop ships pose targets rather than velocities.
     """
     assert action_native.ndim == 2, f"expected [T, D], got {action_native.shape}"
     indices = params["indices"]  # type: ignore[index]
@@ -326,13 +325,13 @@ def main(argv: list[str] | None = None) -> int:
     ds = parser.add_mutually_exclusive_group(required=True)
     ds.add_argument(
         "--dataset",
-        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "robomind"),
         help="Source name (one A100 node per dataset).",
     )
     ds.add_argument(
         "--source",
         dest="dataset",
-        choices=("droid", "bridge", "agibot2026", "rh20t", "robomind"),
+        choices=("droid", "bridge", "agibot2026", "robomind"),
         help="(deprecated) use --dataset",
     )
     parser.add_argument("--chunk", required=True, type=int)
@@ -358,13 +357,6 @@ def main(argv: list[str] | None = None) -> int:
     _logging.basicConfig(level=_logging.INFO)
     log = _logging.getLogger("prep.stage_3_canonical")
 
-    _DATASET_TO_EMBODIMENT = {
-        "droid": "droid_franka",
-        "bridge": "bridge_widowx",
-        "agibot2026": "agibot_g1",
-        "rh20t": "rh20t_franka",
-        "robomind": "robomind_franka",
-    }
     embodiment = args.embodiment or _DATASET_TO_EMBODIMENT.get(args.dataset, args.dataset)
     registry = load_embodiment_registry()
     if embodiment not in registry:
@@ -373,7 +365,43 @@ def main(argv: list[str] | None = None) -> int:
             f"have {sorted(registry)}"
         )
 
-    chunk_dir = args.staged_root / args.dataset / f"chunk-{args.chunk:03d}"
+    n = run_chunk(args.dataset, args.chunk, args.staged_root, embodiment=embodiment, registry=registry)
+    log.info("canonicalized %d episode(s)", n)
+    return 0
+
+
+_DATASET_TO_EMBODIMENT = {
+    "droid": "droid_franka",
+    "bridge": "bridge_widowx",
+    "agibot2026": "agibot_g1",
+    "robomind": "robomind_tien_kung",
+}
+
+
+def run_chunk(
+    dataset: str,
+    chunk: int,
+    staged_root: Path,
+    embodiment: str | None = None,
+    registry: Dict[str, CanonicalRule] | None = None,
+) -> int:
+    """Canonicalize every staged episode under one ``chunk-NNN/`` directory.
+
+    Re-runs are idempotent: each episode writes ``action_canonical_ee.npy``
+    next to its ``action_native.npy``. Missing inputs are skipped.
+
+    Returns the number of episodes canonicalized.
+    """
+    import logging as _logging
+    log = _logging.getLogger("prep.stage_3_canonical")
+    reg = registry or load_embodiment_registry()
+    emb = embodiment or _DATASET_TO_EMBODIMENT.get(dataset, dataset)
+    if emb not in reg:
+        raise KeyError(
+            f"unknown embodiment {emb!r} for dataset {dataset!r}; have {sorted(reg)}"
+        )
+
+    chunk_dir = Path(staged_root) / dataset / f"chunk-{int(chunk):03d}"
     if not chunk_dir.exists():
         log.warning("staged chunk dir %s does not exist; nothing to do", chunk_dir)
         return 0
@@ -385,12 +413,12 @@ def main(argv: list[str] | None = None) -> int:
             log.debug("skipping %s (no action_native.npy)", ep_dir.name)
             continue
         action_native = np.load(action_native_path)
-        canonical = canonicalize_action(action_native, embodiment, registry=registry)
+        canonical = canonicalize_action(action_native, emb, registry=reg)
         validate_action_canonical(canonical)
         np.save(ep_dir / "action_canonical_ee.npy", canonical)
         processed += 1
     log.info("canonicalized %d episode(s) under %s", processed, chunk_dir)
-    return 0
+    return processed
 
 
 if __name__ == "__main__":  # pragma: no cover

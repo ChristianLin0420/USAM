@@ -1,107 +1,112 @@
 # USAM Slurm operational guide
 
 Phase A pipeline runs on the T1 tier: 8×A100, preemptible, 4 h walltime.
-This directory holds the universal job template (`job.sbatch`), the env
-bootstrap (`env.sh`), and the operational runbook (this file).
+This directory holds the universal job template (`job.sbatch`), the
+unified per-dataset pipeline template (`pipeline.sbatch.tmpl`) and its 4
+rendered sbatch files, the env bootstrap (`env.sh`), and this runbook.
 
-## TL;DR
+## TL;DR — recommended path: 4 parallel per-dataset sbatch files
 
 ```bash
 # One-time per cluster setup
 export USAM_REPO=/home/$USER/USAM
 export USAM_SIF=/home/$USER/usam_prep.sif
-export HUGGINGFACE_TOKEN=$(cat ~/.cache/huggingface/token)
+export USAM_SCRATCH=/lustre/.../$USER/usam   # plenty of space for staged outputs
 
-# Submit one chunk
-sbatch slurm/job.sbatch stage_2a_to_lerobot.droid droid 7
+# (Re-)generate the 4 rendered sbatch files from the template.
+bash scripts/prep_render_sbatch.sh
 
-# Submit many — let the dispatcher manage them (Phase 2)
-python -m prep.dispatch --max-pending 64
+# Submit one job per dataset in parallel. Each one runs the full
+# stage-2a → 2c → 3 → 4 → 5 pipeline for that dataset, requeuing itself
+# every 4 h until all chunks land on disk.
+for d in droid agibot2026 robomind bridge; do
+    sbatch slurm/pipeline_${d}.sbatch
+done
+
+# Watch progress.
+squeue -u $USER -o "%.10i %.20j %.8T %.10M %.6D %R"
+ls $USAM_SCRATCH/staged/droid/chunk-*/.pipeline_complete | wc -l
 ```
 
-## Where the upload daemon lives
+The output of each dataset lands at `$USAM_SCRATCH/staged/<dataset>/chunk-NNN/`
+with the LeRobot v2.1 layout (`data/`, `videos/`, `features/`) plus
+per-episode `ep_<hash>/` staging dirs and a final
+`.pipeline_complete` JSON marker. Nothing is uploaded to HF Hub by this
+pipeline — see the legacy section below for the optional Hub path.
 
-**The CommitScheduler (`prep._hub.make_commit_scheduler`) MUST run on a
-login node, not inside a Slurm job.** Reasons:
+## Resume semantics (local-only)
 
-1. The login node has a stable network identity. Slurm jobs are short-lived
-   and each requeue would restart the scheduler from scratch, breaking its
-   internal "last commit" state.
-2. The scheduler holds an HF API token in memory. Tokens leak less when
-   bound to a single shell on a known machine.
-3. Slurm GPU jobs should not waste their walltime on uploads. The upload
-   daemon is IO-bound and needs no GPU.
+Resume is driven entirely by on-disk markers:
 
-Operational pattern:
+* `chunk-NNN/.pipeline_complete` — written atomically as the last step of
+  `PipelineOrchestrator.run_chunk` after stage_5 validation passes. The
+  orchestrator skips any chunk whose marker exists.
+* `chunk-NNN/done/<hash>.ok` (inherited from `CheckpointedJob`) — per-episode
+  marker inside stage_2a. Guards against partial-chunk loss if SIGUSR1 lands
+  mid-stage-2a.
 
-```bash
-# Run in tmux on the login node, persists across SSH sessions.
-tmux new -s usam-uploader
-python -m prep.stage_6_upload --watch /scratch/$USER/usam --repo-prefix <org>/usam-
-# Detach: Ctrl-b d
-```
+On Slurm requeue (after a 4 h timeout or pre-walltime SIGUSR1), the orchestrator
+re-scans markers and resumes from the first un-complete chunk. There is no HF
+round-trip, no `.upload_state.json` to check, no login-node daemon to keep
+alive.
 
 ## How preemption + requeue works
 
 ```
-   sbatch ─▶ Slurm scheduler ─▶ allocates 8×A100 for 3h55m
+   sbatch slurm/pipeline_<ds>.sbatch ─▶ allocates 8×A100 for 4h
               │
               ▼
-   bash job.sbatch
+   bash pipeline_<ds>.sbatch
               │   #SBATCH --signal=B:USR1@600
               │   #SBATCH --requeue
+              │   #SBATCH --dependency=singleton
               │
-              ├─▶ singularity exec ... python -m prep.<stage> &
+              ├─▶ timeout 3.95h srun python -m prep.run_pipeline --dataset <ds> &
               │     │
               │     ▼
-              │   prep._base.CheckpointedJob.run()
+              │   PipelineOrchestrator.run()
               │     ├── installs SIGUSR1 handler
-              │     ├── per-episode loop
-              │     │     │
-              │     │     ▼
-              │     │   between episodes: if _stop_requested ─▶ flush, sys.exit(124)
+              │     ├── per-chunk loop
+              │     │     ├── stage_2a -> 2c -> 3 -> 4 -> 5
+              │     │     └── write .pipeline_complete
+              │     │
+              │     ▼
+              │   if _stop_requested ─▶ return PREEMPT_EXIT_CODE (124)
               │
               ▼
               wait $PYPID
               │
    ┌──────────┴──────────┐
    │                     │
- EXIT == 124          EXIT != 124
-   │                     │
-   ▼                     ▼
- scontrol requeue       exit EXIT
-   │                     │
-   ▼                     ▼
- Slurm resubmits        end (Slurm marks as completed/failed
- the same job id        based on exit code)
-   │
-   ▼
- next allocation reuses the
- SAME chunk dir, sees the
- done/<hash>.ok markers, skips
- already-finished episodes.
+ EXIT in {124, 137}    EXIT == 0          EXIT not in {0,124,137}
+   │                     │                  │
+   ▼                     ▼                  ▼
+ scontrol requeue      exit 0             exit EXIT
+   │                     │                  │
+   ▼                     ▼                  ▼
+ Slurm resubmits        all chunks done    Slurm marks FAILED
+ the same job id        (job done)         (alert humans)
 ```
 
 Key invariants:
 
 * Slurm sends `SIGUSR1` to the **batch shell** 600 s before walltime, because
   of the `B:` prefix in `--signal=B:USR1@600`. Without `B:`, only `srun`'s
-  immediate children get signalled and our nested `singularity exec` would
-  miss it.
-* `prep._base.CheckpointedJob.run` does not raise from the signal handler;
-  it sets a flag and checks it between episodes. This avoids the
-  classic "exception swallowed by the converter library" failure mode.
-* Idempotency is per-episode, not per-shard. The marker file
-  `<chunk_dir>/done/<hash>.ok` is the single source of truth. Only after a
-  shard write succeeds do we touch its episodes' markers.
-* Exit code `124` is the agreed-upon "please requeue" code. Any other
-  non-zero exit is a real failure: the bash wrapper does **not** requeue,
-  Slurm marks the job FAILED, and the dispatcher will retry later (with an
-  exponential backoff schedule).
+  immediate children get signalled.
+* `PipelineOrchestrator._on_sigusr1` does not raise; it flips
+  `self._stop_requested` and `run` polls it between chunks. The in-flight
+  chunk gets to finish, write its `.pipeline_complete`, and only then the
+  process exits 124.
+* `--dependency=singleton` keeps at most one job per dataset in the queue at
+  a time, so requeue can't race the current job.
+* Exit code 124 means "graceful preempt; please requeue". Exit code 137
+  means SIGKILL (Slurm hit the hard walltime); we requeue on that too as a
+  safety net. Any other non-zero exit is a real failure.
 
-## Submitting jobs
+## Submitting jobs (legacy per-stage path)
 
-The template signature is:
+The original `slurm/job.sbatch` template is preserved for ad-hoc per-stage
+runs and for the integration tests that target a single stage. Signature:
 
 ```bash
 sbatch slurm/job.sbatch <stage_module> <dataset> <chunk> [extra args...]
@@ -109,73 +114,87 @@ sbatch slurm/job.sbatch <stage_module> <dataset> <chunk> [extra args...]
 
 * `<stage_module>` is the Python module path under `prep.`, e.g.
   `stage_2a_to_lerobot.droid`. The job runs
-  `python -m prep.<stage_module> --dataset <dataset> --chunk <chunk> --resume`
-  (Wave F: one A100 node per dataset).
-* `<dataset>` is one of `droid`, `agibot2026`, `rh20t`, `robomind`,
-  `bridge`.
+  `python -m prep.<stage_module> --dataset <dataset> --chunk <chunk> --resume`.
+* `<dataset>` is one of `droid`, `agibot2026`, `robomind`, `bridge`.
 * `<chunk>` is a non-negative integer.
 
-Logs land in `${USAM_REPO}/logs/usam-<jobid>.{out,err}`.
+Logs land in `${USAM_REPO}/logs/<job-name>-<jobid>/std{out,err}.log` for the
+new pipeline sbatch files, and `${USAM_REPO}/logs/usam-<jobid>.{out,err}` for
+the legacy `job.sbatch`.
 
-## MAX_PENDING and dispatcher behaviour
+## Optional: HF upload (legacy)
 
-The dispatcher (`prep/dispatch.py`, Phase 2) keeps the queue at most
-**`MAX_PENDING=64`** USAM jobs at a time. The default is conservative: most
-T1 sites cap a single user at 100–200 concurrent jobs and we want headroom
-for other users. Override with:
-
-```bash
-python -m prep.dispatch --max-pending 96
-```
-
-The dispatcher polls every 60 s, queries `squeue -u $USER -h -o %i` to count
-USAM jobs, and only submits when the count is below the cap. It reads
-`manifests/<source>__<stage>.parquet` to find chunks whose dependencies are
-`done` and whose own status is `pending`.
+The pipeline writes everything locally and does NOT upload to HF Hub. If you
+do want to mirror outputs to the Hub, the existing tooling in `prep/_hub.py`
+and `prep/stage_6_upload.py` is unchanged — start a long-lived
+`CommitScheduler` on a login node (`python -m prep.stage_6_upload --watch
+$USAM_SCRATCH/staged/<dataset> --repo-prefix <org>/usam-`) and it will pick
+up new files. This path is not exercised by the per-dataset sbatch files.
 
 ## Required environment variables
 
 Set these in `~/.bashrc` or a per-cluster `.envrc`:
 
-| Variable            | Required | Purpose                                       |
-| ------------------- | -------- | --------------------------------------------- |
-| `USAM_REPO`         | yes      | path to USAM checkout                         |
-| `USAM_SIF`          | yes      | path to `usam_prep.sif` Singularity image     |
-| `HUGGINGFACE_TOKEN` | login only | HF token; only the upload daemon reads it   |
-| `USAM_SCRATCH`      | no       | scratch root (default `/scratch/$USER/usam`)  |
-| `USAM_HF_HOME`      | no       | HF cache (default `$USAM_SCRATCH/hf_cache`)   |
-| `USAM_CONDA_ENV`    | no       | conda env to activate outside Singularity     |
-| `USAM_LOG_LEVEL`    | no       | python log level (default INFO)               |
+| Variable                | Required | Purpose                                       |
+| ----------------------- | -------- | --------------------------------------------- |
+| `USAM_REPO`             | yes      | path to USAM checkout                         |
+| `USAM_SIF`              | yes (for legacy `job.sbatch`) | Singularity image path     |
+| `USAM_SCRATCH`          | yes      | scratch root for staged outputs               |
+| `USAM_HF_HOME`          | no       | HF cache (default `$USAM_SCRATCH/hf_cache`)   |
+| `USAM_PYTHON`           | no       | python interpreter inside the sbatch          |
+| `USAM_NUM_WORKERS_2A`   | no       | stage_2a CPU worker count (default 8)         |
+| `USAM_NUM_GPUS`         | no       | stage_2c/4 GPU count (default 0 = auto)       |
+| `USAM_WORKERS_PER_GPU`  | no       | stage_2c/4 oversubscription (default 1)       |
+| `USAM_DINOV3_CKPT`      | no       | DINOv3 checkpoint id/path                     |
+| `USAM_DA3_CKPT`         | no       | Depth-Anything-V3 checkpoint id/path          |
+| `USAM_CONDA_ENV`        | no       | conda env to activate outside Singularity     |
+| `USAM_LOG_LEVEL`        | no       | python log level (default INFO)               |
+
+## Estimating local space
+
+Quick summary; full per-modality breakdown is in
+[`docs/DISK_SPACE_ESTIMATE.md`](../docs/DISK_SPACE_ESTIMATE.md).
+
+| Dataset    | Episodes (≈) | Chunks (256/chunk) | Per-chunk peak | Per-dataset total |
+| ---------- | ------------ | ------------------ | -------------- | ----------------- |
+| DROID      |    76 000    |    297             |    22 GiB      |    6.4 TiB        |
+| AgiBot2026 | 1 000 000    |  3 907             |    63 GiB      |   >100 TiB        |
+| RoboMIND   |    30 000    |    118             |    44 GiB      |    4.0 TiB        |
+| Bridge V2  |    60 000    |    235             |     7.5 GiB    |    1.6 TiB        |
+| **Total**  |              |                    |                | **>110 TiB**      |
+
+These assume uncompressed ``camera_*.npy`` staging (the default; assemble +
+mp4 encoding shrinks RGB ~15×). For AgiBot, subset by embodiment if your
+scratch can't hold the full uncompressed footprint.
 
 ## Troubleshooting
 
 * **Job exits 124 but is not requeued.** Check that `scontrol requeue` ran
-  in `logs/usam-<jobid>.out`. Some sites disable user-initiated requeue;
-  ask the admin to enable `JobRequeue=1`.
-* **Job killed at 4h with exit 0 instead of 124.** The python process did
-  not catch SIGUSR1 fast enough. Confirm `--signal=B:USR1@600` is in the
-  sbatch header — without `B:` only srun children are signalled.
-* **`huggingface_hub.errors.HfHubHTTPError 413`.** The chunk exceeded
-  per-file size or per-folder file count. Check `prep._hub.validate_chunk`
-  output — it logs the offending file/count and refuses the upload.
-* **`Dataset.push_to_hub` raised RuntimeError.** Working as intended; see
-  `prep._hub.reject_push_to_hub`. Use `upload_chunk_final` instead.
+  in `logs/usam-prep-<ds>-<jobid>/stdout.log`. Some sites disable
+  user-initiated requeue; ask the admin to enable `JobRequeue=1`.
+* **Job killed at 4h with exit 137 instead of 124.** SIGKILL fired because
+  SIGUSR1 was missed. Our wrapper treats 137 as "requeue" too. Confirm
+  `--signal=B:USR1@600` is present.
+* **Chunk re-runs unnecessarily.** Check that the previous run actually
+  wrote `<chunk>/. pipeline_complete`. If stage_5 validation failed, the
+  marker is intentionally absent and the chunk re-runs.
+* **Out of disk on `$USAM_SCRATCH`.** The 4 datasets together can hit
+  ~14 TiB. Process one dataset at a time, or symlink each dataset's
+  `staged/<dataset>` to a separate volume.
 
 ## Who to contact
 
-* Slurm template, env, signal handling, requeue: **pipeline-engineer**
-  (this file's owner).
-* Per-source converter behaviour (DROID, AgiBot, RH20T, RoboMIND, Bridge):
+* Slurm template, env, signal handling, requeue: **pipeline-engineer**.
+* Per-source converter behaviour (DROID, AgiBot, RoboMIND, Bridge):
   **data-engineer**.
 * Singularity image build, pip pinning: **infra-engineer**.
-* Anything routed via `team lead` if it crosses agents.
 
 ## Pre-flight checklist before a large submission
 
-1. `singularity exec $USAM_SIF python -c "import prep, usam"` succeeds.
-2. `sbatch --test-only slurm/job.sbatch <stage> <source> 0` reports a sane
-   start time.
-3. `python -m prep._hub --validate /scratch/$USER/usam/<source>/<stage>/chunk-000`
-   reports `ok=True` on at least one fully-converted chunk.
-4. The CommitScheduler is running in tmux on the login node (check with
-   `tmux ls` and `tail -f` its log).
+1. `python -c "import prep.run_pipeline"` succeeds inside the runtime env.
+2. `bash scripts/prep_render_sbatch.sh` regenerated the 4 sbatch files.
+3. `sbatch --test-only slurm/pipeline_droid.sbatch` reports a sane start time.
+4. `$USAM_SCRATCH` has at least the per-dataset budget free (see the table
+   above). Resolve with `df -h $USAM_SCRATCH`.
+5. Local dry-run worked: `bash scripts/prep_run_local.sh --dataset droid
+   --output-root /tmp/usam --max-chunks 1`.

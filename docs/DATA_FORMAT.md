@@ -39,8 +39,7 @@ One repo per source. Internal layout:
 ```
 
 Per-source repos: `<org>/usam-droid`, `<org>/usam-agibot2026`,
-`<org>/usam-rh20t`, `<org>/usam-robomind`, `<org>/usam-bridge`,
-`<org>/usam-oxe-auge`.
+`<org>/usam-robomind`, `<org>/usam-bridge`, `<org>/usam-oxe-auge`.
 
 ---
 
@@ -80,7 +79,7 @@ described in §3 below.
 >   used by the Stage 1 / Stage 6 plumbing. The richer dataclass above is
 >   the one shipped by every source converter
 >   (`prep/stage_2a_to_lerobot/droid.py:49-69` and re-imported by
->   `agibot2026.py`, `rh20t.py`, `robomind.py`, `bridge.py`).
+>   `agibot2026.py`, `robomind.py`, `bridge.py`).
 > * `EpisodeRef` likewise has two shapes in the codebase
 >   (`prep/_base.py:89-115` exposes `episode_id, source, raw_path,
 >   extra`; the per-source converters use `episode_index, source,
@@ -176,15 +175,6 @@ file for the binding behavior.
   velocity stream so Stage 3 is a passthrough.
   ↳ `prep/stage_2a_to_lerobot/agibot2026.py:9-54`.
 
-* **RH20T** — 7 robot configurations; per-config camera-serial maps
-  live in `configs/data/camera_maps/rh20t.yaml`. The action json is
-  10 Hz, the per-camera mp4s are 30 Hz; we sync via timestamp
-  interpolation (nearest-frame-by-timestamp). F/T sensor (6 DoF) is
-  preserved into `force_torque[T, 6]`. Canonicalization rule =
-  `ee_pose_finite_diff` (native action is a 6-DoF pose + gripper width
-  in mm).
-  ↳ `prep/stage_2a_to_lerobot/rh20t.py:1-43`.
-
 * **RoboMIND** — per-trajectory HDF5 files. **BGR-to-RGB conversion is
   mandatory.** The converter samples a middle frame, asserts via a
   channel-mean heuristic that the array is BGR (blue-mean exceeds
@@ -232,14 +222,13 @@ DataLoader workers, no per-worker duplication.
 
 ## 8. Action canonicalization
 
-The 5 supported embodiment keys (registered at
+The 4 supported embodiment keys (registered at
 `prep/embodiment.json`) and their canonicalization rule names:
 
 | Embodiment | Native dim | Rule |
 |---|---|---|
 | `droid_franka` | 7 | `ee_velocity_passthrough` |
 | `agibot_g1` | 24 | `joint_delta_to_ee_finite_diff` |
-| `rh20t_franka` | 7 | `ee_pose_finite_diff` |
 | `robomind_tien_kung` | 14 | `joint_position_to_ee_finite_diff` |
 | `bridge_widowx` | 7 | `ee_velocity_passthrough` |
 

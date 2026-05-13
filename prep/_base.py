@@ -149,7 +149,7 @@ class EpisodeRef:
         hash derived from this id appears in output filenames, so changing
         it invalidates idempotency.
     source : str
-        One of {"droid", "agibot2026", "rh20t", "robomind", "bridge"}.
+        One of {"droid", "agibot2026", "robomind", "bridge"}.
     raw_path : str
         Absolute path on the local scratch filesystem to the raw episode
         (a TFDS shard, an HDF5 file, etc.). String, not Path, so the dataclass

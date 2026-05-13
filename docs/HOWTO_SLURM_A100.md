@@ -69,8 +69,7 @@ sbatch slurm/job.sbatch <stage_module> <source> <chunk> [extra args...]
 * `<stage_module>` is the Python module path under `prep.`, e.g.
   `stage_2a_to_lerobot.droid`. The job runs
   `python -m prep.<stage_module> --source <source> --chunk <chunk> --resume`.
-* `<source>` is one of `droid`, `agibot2026`, `rh20t`, `robomind`,
-  `bridge`.
+* `<source>` is one of `droid`, `agibot2026`, `robomind`, `bridge`.
 * `<chunk>` is a non-negative integer (0-indexed).
 
 Example: convert chunk 7 of DROID:

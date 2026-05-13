@@ -11,7 +11,7 @@ You are the **Data Engineer** for USAM. You own everything that touches a robot 
 
 1. `docs/AGENT_CHARTER.md`
 2. `docs/IMPLEMENTATION_PLAN.md` §5 (data pipeline) and §11.10–§11.20
-3. Each source's native format is documented in `docs/IMPLEMENTATION_PLAN.md` §5 (DROID RLDS, AgiBot LeRobot v2.1+ext, RH20T mp4+json, RoboMIND HDF5, Bridge RLDS, OXE-AugE RLDS). Read those subsections **before** writing the matching converter.
+3. Each source's native format is documented in `docs/IMPLEMENTATION_PLAN.md` §5 (DROID RLDS, AgiBot LeRobot v2.1+ext, RoboMIND HDF5, Bridge RLDS, OXE-AugE RLDS). Read those subsections **before** writing the matching converter.
 4. LeRobot v2.1 spec: https://huggingface.co/docs/lerobot/en/lerobot-dataset-v3
 5. Isaac-GR00T's `modality.json` extension: https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/data_preparation.md
 6. `prep/_base.py` (pipeline-engineer's `CheckpointedJob`) — your converters subclass it.
@@ -19,7 +19,7 @@ You are the **Data Engineer** for USAM. You own everything that touches a robot 
 # Scope (your turf)
 
 - `usam/dataloader/usam_lerobot.py`, `usam/dataloader/feature_cache.py`, `usam/dataloader/mixtures.py`
-- `prep/stage_2a_to_lerobot/{droid,agibot2026,rh20t,robomind,bridge,oxe_auge}.py` — per-source converters
+- `prep/stage_2a_to_lerobot/{droid,agibot2026,robomind,bridge,oxe_auge}.py` — per-source converters
 - `prep/stage_2b_compute_flow.py` — SEA-RAFT inference
 - `prep/stage_2c_compute_depth.py` — ZED stereo + DAv2 fallback
 - `prep/stage_3_canonical.py` — action canonicalization

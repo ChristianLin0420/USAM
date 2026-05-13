@@ -160,10 +160,30 @@ class RoboMINDConverter(CheckpointedJob):
             if self.drop_simulation and emb_dir.name in ROBOMIND_DROP_EMBODIMENTS:
                 _LOG.info("dropping simulation embodiment %s", emb_dir.name)
                 continue
-            for h5_path in sorted(emb_dir.rglob("*.h5")):
-                ep_id = f"robomind_{emb_dir.name}_{h5_path.stem}"
-                if int(self.episode_hash(ep_id), 16) % 256 != self.chunk:
-                    continue
+            # Match both ``.h5`` and ``.hdf5``. AlayaNeW mirrors and the
+            # x-humanoid-robomind release both ship trajectories as
+            # ``.../<traj_id>/data/trajectory.hdf5``; older releases use
+            # ``.../<traj_id>.h5`` directly.
+            h5_paths = sorted(
+                list(emb_dir.rglob("*.hdf5")) + list(emb_dir.rglob("*.h5"))
+            )
+            # Position-based chunk assignment respecting
+            # ``USAM_EPISODES_PER_CHUNK`` (defaults to
+            # :data:`prep._base.EPISODES_PER_CHUNK`). The previous
+            # hash-based ``% 256`` distribution silently dropped every
+            # small-dataset chunk to size 0.
+            from prep._base import shard_assignment
+            my_indices = shard_assignment(n_total=len(h5_paths), chunk=self.chunk)
+            for idx in my_indices:
+                h5_path = h5_paths[idx]
+                if h5_path.name in {"trajectory.hdf5", "trajectory.h5"}:
+                    p = h5_path.parent
+                    while p != emb_dir and p.name in {"data"}:
+                        p = p.parent
+                    unique_stem = p.name
+                else:
+                    unique_stem = h5_path.stem
+                ep_id = f"robomind_{emb_dir.name}_{unique_stem}"
                 refs.append(
                     EpisodeRef(
                         episode_id=ep_id,
@@ -192,32 +212,79 @@ class RoboMINDConverter(CheckpointedJob):
     def _h5_to_payload(self, h5_file) -> Dict[str, np.ndarray]:
         """Pull the relevant arrays out of an open ``h5py.File``.
 
-        Kept separate from ``convert_episode`` so unit tests can pass a dict
-        rather than synthesizing an HDF5 file.
+        Handles two on-disk schemas:
+
+        * Original RoboMIND: cameras at ``observations/images/<cam>`` (raw
+          uint8 frames), proprio at ``observations/{joint_position,ee_pose,
+          ee_velocity}``, actions at top-level ``actions``, language at
+          top-level ``language_instruction``.
+
+        * AlayaNeW mirror (e.g. ``h5_tienkung_gello_1rgb``): cameras at
+          ``observations/rgb_images/<cam>`` as JPEG-encoded ``object``
+          arrays; proprio at top-level ``puppet/joint_position``;
+          actions at top-level ``master/joint_position`` (gello leader
+          commands); language at ``language_raw``.
+
+        Kept separate from ``convert_episode`` so unit tests can pass a
+        synthetic payload dict.
         """
         payload: Dict[str, np.ndarray] = {}
-        try:
+
+        # Cameras — try both schemas; JPEG-encoded object arrays get
+        # decoded to uint8 [T, H, W, 3] BGR (the converter's BGR-detect
+        # heuristic then swaps to RGB).
+        if "observations" in h5_file:
             obs = h5_file["observations"]
-        except KeyError:
-            return payload
+            for img_grp_name in ("images", "rgb_images"):
+                if img_grp_name in obs:
+                    for cam_name in obs[img_grp_name].keys():
+                        arr = obs[img_grp_name][cam_name]
+                        if arr.dtype == np.dtype("O"):
+                            # JPEG-encoded byte strings; decode each frame.
+                            import cv2  # type: ignore[import-not-found]
+                            decoded = []
+                            for raw in arr[:]:
+                                buf = np.frombuffer(bytes(raw), dtype=np.uint8)
+                                img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+                                if img is not None:
+                                    decoded.append(img)
+                            if decoded:
+                                payload[f"camera::{cam_name}"] = np.stack(decoded, axis=0)
+                        else:
+                            payload[f"camera::{cam_name}"] = np.asarray(arr[:])
+                    break  # Don't process both 'images' and 'rgb_images'.
 
-        # Cameras live under observations/images/<cam>.
-        if "images" in obs:
-            for cam_name in obs["images"].keys():
-                payload[f"camera::{cam_name}"] = np.asarray(obs["images"][cam_name][:])
+            for k in ("joint_position", "ee_pose", "ee_velocity"):
+                if k in obs:
+                    payload[f"obs::{k}"] = np.asarray(obs[k][:])
 
-        for k in ("joint_position", "ee_pose", "ee_velocity"):
-            if k in obs:
-                payload[f"obs::{k}"] = np.asarray(obs[k][:])
-
+        # Top-level actions: prefer ``actions``, fall back to AlayaNeW gello
+        # layout (``master/joint_position`` = teleop command stream).
         if "actions" in h5_file:
             payload["actions"] = np.asarray(h5_file["actions"][:])
-        if "language_instruction" in h5_file:
-            raw = h5_file["language_instruction"][()]
-            if isinstance(raw, (bytes, bytearray)):
-                payload["language_instruction"] = np.array([raw.decode("utf-8", errors="ignore")])
-            else:
-                payload["language_instruction"] = np.asarray(raw)
+        elif "master" in h5_file and "joint_position" in h5_file["master"]:
+            payload["actions"] = np.asarray(h5_file["master"]["joint_position"][:])
+
+        # Top-level proprio fallback if observations/... didn't ship it:
+        # AlayaNeW puts the robot's actual joint state at ``puppet/joint_position``.
+        if "obs::joint_position" not in payload and "puppet" in h5_file:
+            if "joint_position" in h5_file["puppet"]:
+                payload["obs::joint_position"] = np.asarray(
+                    h5_file["puppet"]["joint_position"][:]
+                )
+
+        # Language instruction — three known key names.
+        for key in ("language_instruction", "language_raw"):
+            if key in h5_file:
+                raw = h5_file[key][()]
+                if isinstance(raw, np.ndarray) and raw.size > 0:
+                    raw = raw.flat[0]
+                if isinstance(raw, (bytes, bytearray)):
+                    text = raw.decode("utf-8", errors="ignore")
+                else:
+                    text = str(raw)
+                payload["language_instruction"] = np.array([text])
+                break
         return payload
 
     def _payload_to_result(

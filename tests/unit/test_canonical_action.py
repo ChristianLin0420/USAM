@@ -6,9 +6,9 @@ Verifies that for **every** embodiment in ``prep/embodiment.json``:
     2. ``validate_action_canonical`` accepts it (bounds OK)
     3. The values are inside the documented ranges
 
-After Phase 2 there are zero stub embodiments — all five (DROID, AgiBot G1,
-RH20T, RoboMIND Tien Kung, Bridge WidowX) round-trip with real rules. The
-legacy "expects NotImplementedError on stubs" assertion is gone; the new
+After Phase 2 there are zero stub embodiments — all four (DROID, AgiBot G1,
+RoboMIND Tien Kung, Bridge WidowX) round-trip with real rules. The legacy
+"expects NotImplementedError on stubs" assertion is gone; the new
 ``test_no_phase2_stubs_remain`` flips it: zero stubs allowed.
 """
 
@@ -34,21 +34,6 @@ def _tiny_droid_action_native(seed: int = 7) -> np.ndarray:
     a[:, 3:6] = rng.uniform(-1.0, 1.0, size=(30, 3))
     a[:, 6] = rng.uniform(0.0, 1.0, size=(30,))
     return a
-
-
-def _tiny_pose_stream(T: int, seed: int = 11) -> np.ndarray:
-    """A small ``[T, 7]`` pose stream: smooth pos + rotvec + gripper.
-
-    Used for ``ee_pose_finite_diff`` (RH20T) round-trip. The pose values are
-    chosen so the finite-difference velocity comfortably fits the canonical
-    bounds.
-    """
-    rng = np.random.default_rng(seed)
-    t = np.linspace(0, 1, T, dtype=np.float32)
-    pos = np.stack([0.1 * t, -0.05 * t, 0.02 * t], axis=1)
-    rot = np.stack([0.05 * t, -0.05 * t, 0.10 * t], axis=1)
-    grip = rng.uniform(0.0, 1.0, size=(T,)).astype(np.float32)
-    return np.concatenate([pos, rot, grip[:, None]], axis=1)
 
 
 def _tiny_prefilled_native(T: int, native_dim: int, seed: int = 13) -> np.ndarray:
@@ -122,22 +107,19 @@ def test_registry_round_trip_every_known_embodiment() -> None:
     realistic per-rule input shapes:
 
     * ``ee_velocity_passthrough`` (DROID, Bridge): random 7-D velocity stream.
-    * ``ee_pose_finite_diff`` (RH20T): smooth pose stream.
     * ``joint_position_to_ee_finite_diff`` / ``joint_delta_to_ee_finite_diff``
       (RoboMIND, AgiBot): the converter contract pre-fills cols 0..6 with
       canonical EE; we mirror that here.
     """
     reg = load_embodiment_registry()
     assert "droid_franka" in reg
-    assert len(reg) == 5, f"expected 5 embodiments, got {sorted(reg)}"
+    assert len(reg) == 4, f"expected 4 embodiments, got {sorted(reg)}"
 
     T = 8
     for name, rule in reg.items():
         if rule.kind == "ee_velocity_passthrough":
             # Use a random 7-D velocity stream within bounds.
             a_native = _tiny_droid_action_native()[:T]
-        elif rule.kind == "ee_pose_finite_diff":
-            a_native = _tiny_pose_stream(T)
         elif rule.kind in (
             "joint_position_to_ee_finite_diff",
             "joint_delta_to_ee_finite_diff",
@@ -171,18 +153,6 @@ def test_registry_contains_droid_franka() -> None:
     assert rule.native_dim == 7
     assert rule.ee_dim == 7
     assert not rule.is_stub
-
-
-def test_rh20t_pose_diff_zero_motion_yields_zero_velocity() -> None:
-    """RH20T's finite-diff rule on a constant pose must yield zero velocity."""
-    T = 6
-    a_native = np.zeros((T, 7), dtype=np.float32)
-    a_native[:, 0:3] = 0.1  # constant position
-    a_native[:, 3:6] = 0.05  # constant rotvec
-    a_native[:, 6] = 0.5  # constant gripper
-    canon = canonicalize_action(a_native, "rh20t_franka")
-    np.testing.assert_array_almost_equal(canon[:, 0:6], 0.0, decimal=5)
-    np.testing.assert_array_almost_equal(canon[:, 6], 0.5, decimal=5)
 
 
 def test_prefilled_rules_are_passthrough_on_first_seven_columns() -> None:

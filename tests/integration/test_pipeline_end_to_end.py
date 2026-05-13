@@ -350,7 +350,7 @@ def test_dispatcher_throttle_caps_in_flight(tmp_path: Path) -> None:
         n_calls["v"] += 1
         return PREEMPT_EXIT_CODE, f"stuck-{n_calls['v']}"
 
-    sources = ["droid", "agibot2026", "rh20t"]
+    sources = ["droid", "agibot2026", "robomind"]
     dispatcher = SlurmDispatcher(
         output_root=output_root,
         max_pending=3,

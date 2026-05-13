@@ -57,7 +57,7 @@ data:
   future_frames: 8
   action_chunk: 8
   fps_features: 5
-  # 30 Hz on production datasets (DROID, AgiBot, RH20T, etc.). The
+  # 30 Hz on production datasets (DROID, AgiBot, RoboMIND, etc.). The
   # synthesized smoke fixture is 15 fps; the smoke test overrides this
   # in `test_smoke_train.py` by reading the fixture's info.json.
   fps_action: 30

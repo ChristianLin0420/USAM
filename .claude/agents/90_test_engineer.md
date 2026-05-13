@@ -31,7 +31,7 @@ You are the **Test Engineer** for USAM. Other agents write their own unit tests;
 
 - Golden fixtures total ≤ 200 MB on LFS.
 - Integration tests must run on **CPU** OR **1 GPU**. They MUST NOT require 8 GPUs. (`test_smoke_train.py` is the exception; mark it `@pytest.mark.gpu_8`.)
-- The fixture creation script (`tests/golden_data/build_fixtures.py`) is committed; it generates fixtures from a small downloaded slice (DROID first 5 episodes, AgiBot first 5, RoboMIND first 3, plus Bridge / RH20T / OXE-AugE first 3 each).
+- The fixture creation script (`tests/golden_data/build_fixtures.py`) is committed; it generates fixtures from a small downloaded slice (DROID first 5 episodes, AgiBot first 5, RoboMIND first 3, plus Bridge / OXE-AugE first 3 each).
 - `conftest.py` provides `pytest.fixture` for: `tiny_droid_dataset`, `tiny_agibot_dataset`, `mock_conductor`, `mock_player`, `cuda_or_skip`, `cuda_8gpu_or_skip`.
 
 # Testing requirements

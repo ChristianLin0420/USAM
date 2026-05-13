@@ -28,11 +28,6 @@ import pytest
 from prep._base import EpisodeRef
 from prep.stage_2a_to_lerobot.agibot2026 import AgiBot2026Converter, AGIBOT_FPS
 from prep.stage_2a_to_lerobot.bridge import BridgeConverter, BRIDGE_FPS
-from prep.stage_2a_to_lerobot.rh20t import (
-    RH20TConverter,
-    RH20T_FPS,
-    _select_nearest_indices,
-)
 from prep.stage_2a_to_lerobot.robomind import (
     RoboMINDConverter,
     ROBOMIND_FPS,
@@ -138,59 +133,6 @@ def test_agibot_action_native_first_seven_cols_are_canonical_velocity(
     np.testing.assert_array_almost_equal(
         result.action_native[:, :7], result.action_canonical_ee, decimal=5
     )
-
-
-# ---------------------------------------------------------------------------
-# RH20T
-# ---------------------------------------------------------------------------
-
-
-def test_rh20t_list_empty_when_no_raw(tmp_path: Path) -> None:
-    out = _make_tmp_dir(tmp_path, "rh20t_out")
-    conv = RH20TConverter(chunk=0, output_root=out, raw_root=None)
-    assert list(conv.list_episodes()) == []
-
-
-def test_rh20t_json_to_result_finite_diff_velocity(tmp_path: Path) -> None:
-    out = _make_tmp_dir(tmp_path, "rh20t_out")
-    conv = RH20TConverter(chunk=0, output_root=out, raw_root=None)
-    T = 8
-    frames = []
-    for i in range(T):
-        frames.append(
-            {
-                "timestamp": float(i) / RH20T_FPS,
-                "tcp_pose": [0.05 * i, 0.0, 0.0, 0.01 * i, 0.0, 0.0],
-                "gripper": 30.0,  # mm, normalized to ~30/85
-                "ft": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "joints": [0.0, 0.1, 0.0, -0.5, 0.0, 0.5, 0.0],
-            }
-        )
-    action_data = {"task_description": "wipe the table", "frames": frames}
-    ep_dir = _make_tmp_dir(tmp_path, "rh20t_ep")
-    ref = EpisodeRef(
-        episode_id="rh20t_test_ep",
-        source="rh20t",
-        raw_path=str(ep_dir),
-        extra={"config": "RH20T_cfg1"},
-    )
-    result = conv._json_to_result(ref, ep_dir, action_data)
-    assert result.fps == RH20T_FPS
-    assert result.action_canonical_ee.shape == (T, 7)
-    validate_action_canonical(result.action_canonical_ee)
-    # Constant-rate position sweep + constant rotvec sweep -> nonzero lin/ang vel.
-    assert np.abs(result.action_canonical_ee[0, 0]) > 0.0  # x-velocity nonzero
-    assert result.force_torque is not None
-    assert result.force_torque.shape == (T, 6)
-
-
-def test_rh20t_select_nearest_indices_basic() -> None:
-    target = np.array([0.0, 0.5, 1.0, 1.5, 2.0], dtype=np.float32)
-    source = np.linspace(0.0, 2.0, 21, dtype=np.float32)  # 0.1 s grid
-    out = _select_nearest_indices(target, source)
-    assert out.shape == (5,)
-    # Each target should land on its exact tick.
-    np.testing.assert_array_equal(out, np.array([0, 5, 10, 15, 20]))
 
 
 # ---------------------------------------------------------------------------
